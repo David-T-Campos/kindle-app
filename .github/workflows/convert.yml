@@ -1,0 +1,45 @@
+name: Convert one selected book
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id: { required: true, type: string }
+      issued_at: { required: true, type: string }
+      token: { required: true, type: string }
+      origin: { required: true, type: string }
+      region: { required: true, type: string }
+      calibre_version: { required: true, type: string }
+      profile_version: { required: true, type: string }
+      validator_version: { required: true, type: string }
+
+permissions:
+  contents: read
+
+concurrency:
+  group: os-meus-livros-conversion
+  cancel-in-progress: false
+
+jobs:
+  convert:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the pinned conversion worker
+        run: docker build --pull --build-arg CALIBRE_VERSION="${{ inputs.calibre_version }}" --tag os-meus-livros-worker worker-runtime
+      - name: Convert, validate, and submit one book
+        env:
+          WORKER_SHARED_SECRET: ${{ secrets.WORKER_SHARED_SECRET }}
+          APP_ORIGIN: ${{ inputs.origin }}
+          CALIBRE_VERSION: ${{ inputs.calibre_version }}
+          EPUBCHECK_VERSION: "5.3.0"
+          JOB_PAYLOAD: ${{ toJSON(inputs) }}
+        run: |
+          docker run --rm \
+            --entrypoint python3 \
+            --env WORKER_SHARED_SECRET \
+            --env APP_ORIGIN \
+            --env CALIBRE_VERSION \
+            --env EPUBCHECK_VERSION \
+            --env JOB_PAYLOAD \
+            os-meus-livros-worker /app/run_job.py
