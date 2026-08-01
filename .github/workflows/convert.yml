@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: os-meus-livros-conversion
+  group: os-meus-livros-${{ inputs.job_id }}
   cancel-in-progress: false
 
 jobs:
@@ -24,7 +24,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Build the pinned conversion worker
         run: docker build --pull --build-arg CALIBRE_VERSION="${{ inputs.calibre_version }}" --tag os-meus-livros-worker worker-runtime
       - name: Convert, validate, and submit one book
@@ -33,6 +35,8 @@ jobs:
           APP_ORIGIN: ${{ inputs.origin }}
           CALIBRE_VERSION: ${{ inputs.calibre_version }}
           EPUBCHECK_VERSION: "5.3.0"
+          PROFILE_VERSION: ${{ inputs.profile_version }}
+          VALIDATOR_VERSION: ${{ inputs.validator_version }}
           JOB_PAYLOAD: ${{ toJSON(inputs) }}
         run: |
           docker run --rm \
@@ -41,5 +45,7 @@ jobs:
             --env APP_ORIGIN \
             --env CALIBRE_VERSION \
             --env EPUBCHECK_VERSION \
+            --env PROFILE_VERSION \
+            --env VALIDATOR_VERSION \
             --env JOB_PAYLOAD \
             os-meus-livros-worker /app/run_job.py
