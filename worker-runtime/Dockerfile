@@ -1,8 +1,8 @@
 FROM ubuntu:24.04
 
-ARG CALIBRE_VERSION=9.11.0
+ARG CALIBRE_VERSION=9.12.0
 ARG EPUBCHECK_VERSION=5.3.0
-ENV DEBIAN_FRONTEND=noninteractive CALIBRE_VERSION=${CALIBRE_VERSION} EPUBCHECK_VERSION=${EPUBCHECK_VERSION} PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive CALIBRE_VERSION=${CALIBRE_VERSION} EPUBCHECK_VERSION=${EPUBCHECK_VERSION} PROFILE_VERSION=default-1 VALIDATOR_VERSION=1 PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl xz-utils unzip openjdk-21-jre-headless clamav libegl1 libgl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0 libxcb-xinerama0 libnss3 libxcomposite1 libxdamage1 libxrandr2 && rm -rf /var/lib/apt/lists/*
 RUN freshclam
