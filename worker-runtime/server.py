@@ -3,8 +3,9 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.request import Request, urlopen
+from urllib.parse import unquote
 from urllib.error import HTTPError
-import hashlib, json, os, re, shutil, subprocess, tempfile, time, unicodedata, zipfile
+import hashlib, json, os, re, subprocess, tempfile, time, unicodedata, zipfile
 import xml.etree.ElementTree as ET
 
 PORT = int(os.environ.get("PORT", "8080"))
@@ -12,8 +13,11 @@ SHARED = os.environ.get("WORKER_SHARED_SECRET", "")
 APP_ORIGIN = os.environ.get("APP_ORIGIN", "").rstrip("/")
 MAX_SOURCE = int(os.environ.get("MAX_SOURCE_BYTES", str(50 * 1024 * 1024)))
 MAX_UNPACKED = int(os.environ.get("MAX_UNPACKED_BYTES", str(500 * 1024 * 1024)))
-CALIBRE = os.environ.get("CALIBRE_VERSION", "9.11.0")
+MAX_ARCHIVE_FILES = int(os.environ.get("MAX_ARCHIVE_FILES", "10000"))
+CALIBRE = os.environ.get("CALIBRE_VERSION", "9.12.0")
 EPUBCHECK = os.environ.get("EPUBCHECK_VERSION", "5.3.0")
+PROFILE = os.environ.get("PROFILE_VERSION", "default-1")
+VALIDATOR = os.environ.get("VALIDATOR_VERSION", "1")
 STAGES = {"DOWNLOAD", "CONVERT", "VERIFY", "PREPARE", "SEND"}
 
 class PipelineError(Exception):
@@ -42,6 +46,7 @@ def status(job, stage, detail, state="RUNNING", **extra):
 def safe_zip(path):
     if not zipfile.is_zipfile(path): return
     with zipfile.ZipFile(path) as archive:
+        if len(archive.infolist()) > MAX_ARCHIVE_FILES: raise PipelineError("ARCHIVE_FILE_LIMIT", "Archive contains too many files")
         total = 0
         for info in archive.infolist():
             name = info.filename.replace("\\", "/")
@@ -56,7 +61,7 @@ def download(job, target):
     with urlopen(request, timeout=300) as response, open(target, "wb") as output:
         total = int(response.headers.get("content-length", 0)); disposition = response.headers.get("content-disposition", "")
         match = re.search(r"filename\*=UTF-8''([^;]+)", disposition)
-        source_name = match.group(1) if match else "source.bin"
+        source_name = unquote(match.group(1)) if match else "source.bin"
         while True:
             chunk = response.read(1024 * 1024)
             if not chunk: break
@@ -89,7 +94,8 @@ def protected(path):
             if "META-INF/encryption.xml" in archive.namelist():
                 text = archive.read("META-INF/encryption.xml").decode("utf-8", "replace")
                 allowed = ("http://www.idpf.org/2008/embedding", "http://ns.adobe.com/pdf/enc#RC")
-                if "EncryptionMethod" in text and not all(uri in allowed for uri in re.findall(r'Algorithm=["\']([^"\']+)', text)): raise PipelineError("PROTECTED_BOOK", "Unsupported EPUB encryption")
+                algorithms = re.findall(r'Algorithm=["\']([^"\']+)', text)
+                if "EncryptedData" in text and (not algorithms or any(uri not in allowed for uri in algorithms)): raise PipelineError("PROTECTED_BOOK", "Unsupported EPUB encryption")
 
 def encoding_args(path):
     if path.suffix.lower() not in {".txt", ".html", ".htm", ".rtf"}: return []
@@ -98,7 +104,7 @@ def encoding_args(path):
     except UnicodeDecodeError: return ["--input-encoding", "windows-1252"]
 
 def convert(job, source, output, quality=None):
-    command = ["ebook-convert", str(source), str(output), "--output-profile", "kindle_pw3", "--change-justification", "original", *encoding_args(source)]
+    command = ["timeout", "--signal=TERM", "20m", "ebook-convert", str(source), str(output), "--output-profile", "kindle_pw3", "--change-justification", "original", *encoding_args(source)]
     if quality: command += ["--jpeg-quality", str(quality)]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
     milestones = [("InputFormatPlugin", "A ler o ficheiro original"), ("Parsing all content", "A construir a estrutura do livro"), ("Processing images", "A processar imagens e estilos"), ("Creating EPUB Output", "A criar o novo EPUB"), ("Output saved", "A finalizar o EPUB")]
@@ -177,7 +183,7 @@ def run(job):
     with tempfile.TemporaryDirectory(prefix="oml-") as folder:
         work = Path(folder); source = work / "source.bin"; output = work / "book.epub"
         try:
-            if job.get("origin", "").rstrip("/") != APP_ORIGIN or job.get("calibreVersion") != CALIBRE: raise PipelineError("CONFIG_MISMATCH", "Worker configuration mismatch")
+            if job.get("origin", "").rstrip("/") != APP_ORIGIN or job.get("calibreVersion") != CALIBRE or job.get("profileVersion") != PROFILE or job.get("validatorVersion") != VALIDATOR: raise PipelineError("CONFIG_MISMATCH", "Worker configuration mismatch")
             t = time.time(); source_hash, source_size, source_name = download(job, source); timings["downloadMs"] = int((time.time()-t)*1000)
             suffix = Path(source_name).suffix.lower(); source_named = work / f"source{suffix or '.bin'}"; source.rename(source_named); source = source_named
             protected(source); scan(source)
@@ -211,7 +217,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/run": self.reply(404, {"error": "not found"}); return
         if not SHARED or self.headers.get("x-dispatch-secret") != SHARED: self.reply(403, {"error": "forbidden"}); return
         try:
-            length = int(self.headers.get("content-length", "0")); job = json.loads(self.rfile.read(length)); run(job); self.reply(200, {"ok": True})
+            length = int(self.headers.get("content-length", "0"))
+            if length <= 0 or length > 65536: self.reply(413, {"error": "invalid payload"}); return
+            job = json.loads(self.rfile.read(length)); run(job); self.reply(200, {"ok": True})
         except PipelineError as error: self.reply(422, {"error": error.code})
         except Exception as error: print(json.dumps({"level": "error", "error": type(error).__name__, "message": str(error)[:500]}), flush=True); self.reply(500, {"error": "internal"})
     def reply(self, code, payload):
