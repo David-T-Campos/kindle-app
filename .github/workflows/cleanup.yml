@@ -20,4 +20,4 @@ jobs:
           curl --fail-with-body --silent --show-error --retry 3 --max-time 60 \
             --request POST \
             --header "x-worker-secret: ${WORKER_SHARED_SECRET}" \
-            https://os-meus-livros.campos-famil-6072.chatgpt.site/api/internal/cleanup
+            https://os-meus-livros.vercel.app/api/internal/cleanup
