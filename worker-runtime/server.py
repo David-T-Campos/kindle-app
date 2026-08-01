@@ -18,6 +18,7 @@ CALIBRE = os.environ.get("CALIBRE_VERSION", "9.12.0")
 EPUBCHECK = os.environ.get("EPUBCHECK_VERSION", "5.3.0")
 PROFILE = os.environ.get("PROFILE_VERSION", "default-1")
 VALIDATOR = os.environ.get("VALIDATOR_VERSION", "1")
+MAX_JOB_AGE = int(os.environ.get("MAX_JOB_AGE_SECONDS", "1680"))
 STAGES = {"DOWNLOAD", "CONVERT", "VERIFY", "PREPARE", "SEND"}
 
 class PipelineError(Exception):
@@ -42,6 +43,10 @@ def status(job, stage, detail, state="RUNNING", **extra):
     assert stage in STAGES or stage == "SUBMITTED"
     payload = {"stage": stage, "detail": detail, "state": state}; payload.update(extra)
     api(job, "status", "PATCH", payload)
+
+def ensure_current(job, phase):
+    if time.time() - int(job["issuedAt"]) > MAX_JOB_AGE:
+        raise PipelineError("WORKER_TIMEOUT", f"Job expired before {phase}")
 
 def safe_zip(path):
     if not zipfile.is_zipfile(path): return
@@ -194,8 +199,10 @@ def run(job):
             if output.stat().st_size > 24 * 1024 * 1024:
                 optimized = work / "book-optimized.epub"; convert(job, output, optimized, 85); report = validate(job, output, optimized); output = optimized
             if output.stat().st_size > 24 * 1024 * 1024: raise PipelineError("TOO_LARGE", "Validated EPUB exceeds Gmail's attachment limit")
+            ensure_current(job, "artifact upload")
             digest, size = upload(job, output, report); timings["totalMs"] = int((time.time()-started)*1000)
             status(job, "SEND", "A construir uma mensagem com um único EPUB", outputSize=size, validation=report, timings=timings)
+            ensure_current(job, "email submission")
             api(job, "submit", "POST", {"artifactHash": digest})
         except PipelineError as error:
             try: status(job, "DOWNLOAD" if not output.exists() else "VERIFY", "O processamento parou em segurança", "FAILED", errorCode=error.code, timings=timings)
