@@ -3,14 +3,15 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.request import Request, urlopen
-from urllib.parse import unquote
-from urllib.error import HTTPError
+from urllib.parse import quote, unquote
+from urllib.error import HTTPError, URLError
 import hashlib, json, os, re, shutil, subprocess, tempfile, time, unicodedata, zipfile
 import xml.etree.ElementTree as ET
 
 PORT = int(os.environ.get("PORT", "8080"))
-SHARED = os.environ.get("WORKER_SHARED_SECRET", "")
 APP_ORIGIN = os.environ.get("APP_ORIGIN", "").rstrip("/")
+OIDC_REQUEST_URL = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+OIDC_REQUEST_TOKEN = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
 MAX_SOURCE = int(os.environ.get("MAX_SOURCE_BYTES", str(50 * 1024 * 1024)))
 MAX_UNPACKED = int(os.environ.get("MAX_UNPACKED_BYTES", str(500 * 1024 * 1024)))
 MAX_ARCHIVE_FILES = int(os.environ.get("MAX_ARCHIVE_FILES", "10000"))
@@ -24,8 +25,32 @@ STAGES = {"DOWNLOAD", "CONVERT", "VERIFY", "PREPARE", "SEND"}
 class PipelineError(Exception):
     def __init__(self, code, message): super().__init__(message); self.code = code
 
+_oidc_cache = {"token": "", "exp": 0, "audience": ""}
+
+def _jwt_exp(token):
+    import base64
+    encoded = token.split(".")[1]
+    encoded += "=" * ((4 - len(encoded) % 4) % 4)
+    return int(json.loads(base64.urlsafe_b64decode(encoded))["exp"])
+
+def github_identity(subject):
+    audience = f"os-meus-livros:{subject}"
+    if _oidc_cache["token"] and _oidc_cache["audience"] == audience and _oidc_cache["exp"] > time.time() + 60:
+        return _oidc_cache["token"]
+    if not OIDC_REQUEST_URL or not OIDC_REQUEST_TOKEN:
+        raise PipelineError("WORKER_IDENTITY_UNAVAILABLE", "GitHub job identity is unavailable")
+    separator = "&" if "?" in OIDC_REQUEST_URL else "?"
+    request = Request(f"{OIDC_REQUEST_URL}{separator}audience={quote(audience, safe='')}", headers={"authorization": f"Bearer {OIDC_REQUEST_TOKEN}"})
+    try:
+        with urlopen(request, timeout=30) as response:
+            token = json.loads(response.read())["value"]
+    except (HTTPError, URLError, KeyError, ValueError) as error:
+        raise PipelineError("WORKER_IDENTITY_UNAVAILABLE", "GitHub job identity could not be issued") from error
+    _oidc_cache.update(token=token, exp=_jwt_exp(token), audience=audience)
+    return token
+
 def headers_for(job):
-    return {"x-worker-secret": SHARED, "x-job-issued-at": str(job["issuedAt"]), "x-job-token": job["token"]}
+    return {"x-github-oidc-token": github_identity(job["jobId"])}
 
 def api(job, suffix, method="GET", body=None, extra=None):
     url = f'{APP_ORIGIN}/api/internal/jobs/{job["jobId"]}/{suffix}'
