@@ -1,0 +1,37 @@
+name: Build conversion worker image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "worker-runtime/**"
+      - ".github/workflows/build-worker.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: os-meus-livros-worker-image
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Sign in to the private image registry
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+      - name: Build, verify, and publish the pinned worker
+        env:
+          WORKER_IMAGE: ghcr.io/david-t-campos/kindle-app-worker:calibre-9.12.0-v2
+        run: |
+          docker build --pull --build-arg CALIBRE_VERSION=9.12.0 --tag "$WORKER_IMAGE" worker-runtime
+          docker run --rm --entrypoint /bin/sh "$WORKER_IMAGE" -c 'test -e /usr/share/zoneinfo/UTC && ebook-convert --version && java -jar /opt/epubcheck/epubcheck.jar --version'
+          docker push "$WORKER_IMAGE"
