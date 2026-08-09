@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: none
+  id-token: write
 
 jobs:
   cleanup:
@@ -14,10 +15,12 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Delete expired private artifacts
-        env:
-          WORKER_SHARED_SECRET: ${{ secrets.WORKER_SHARED_SECRET }}
         run: |
+          OIDC_TOKEN=$(curl --fail-with-body --silent --show-error --max-time 30 \
+            --header "authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=os-meus-livros%3Acleanup" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')
+          echo "::add-mask::$OIDC_TOKEN"
           curl --fail-with-body --silent --show-error --retry 3 --max-time 60 \
             --request POST \
-            --header "x-worker-secret: ${WORKER_SHARED_SECRET}" \
+            --header "x-github-oidc-token: ${OIDC_TOKEN}" \
             https://os-meus-livros.vercel.app/api/internal/cleanup
