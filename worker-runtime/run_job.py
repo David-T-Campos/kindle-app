@@ -11,7 +11,6 @@ inputs = json.loads(payload)
 run({
     "jobId": inputs["job_id"],
     "issuedAt": int(inputs["issued_at"]),
-    "token": inputs["token"],
     "origin": inputs["origin"],
     "region": inputs["region"],
     "calibreVersion": inputs["calibre_version"],
