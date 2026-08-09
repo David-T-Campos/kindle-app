@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Isolated, single-book Calibre worker for Os Meus Livros."""
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.parse import quote, unquote
@@ -8,7 +7,6 @@ from urllib.error import HTTPError, URLError
 import hashlib, json, os, re, shutil, subprocess, tempfile, time, unicodedata, zipfile
 import xml.etree.ElementTree as ET
 
-PORT = int(os.environ.get("PORT", "8080"))
 APP_ORIGIN = os.environ.get("APP_ORIGIN", "").rstrip("/")
 OIDC_REQUEST_URL = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", "")
 OIDC_REQUEST_TOKEN = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
@@ -271,24 +269,3 @@ def run(job):
                 if child.is_file():
                     try: child.write_bytes(b"\0" * min(child.stat().st_size, 1024 * 1024))
                     except OSError: pass
-
-class Handler(BaseHTTPRequestHandler):
-    server_version = "OsMeusLivrosWorker/1"
-    def log_message(self, fmt, *args): print(json.dumps({"message": fmt % args, "time": time.time()}), flush=True)
-    def do_GET(self):
-        if self.path == "/health": self.reply(200, {"ok": True, "calibre": CALIBRE, "epubcheck": EPUBCHECK}); return
-        self.reply(404, {"error": "not found"})
-    def do_POST(self):
-        if self.path != "/run": self.reply(404, {"error": "not found"}); return
-        if not SHARED or self.headers.get("x-dispatch-secret") != SHARED: self.reply(403, {"error": "forbidden"}); return
-        try:
-            length = int(self.headers.get("content-length", "0"))
-            if length <= 0 or length > 65536: self.reply(413, {"error": "invalid payload"}); return
-            job = json.loads(self.rfile.read(length)); run(job); self.reply(200, {"ok": True})
-        except PipelineError as error: self.reply(422, {"error": error.code})
-        except Exception as error: print(json.dumps({"level": "error", "error": type(error).__name__, "message": str(error)[:500]}), flush=True); self.reply(500, {"error": "internal"})
-    def reply(self, code, payload):
-        body = json.dumps(payload).encode(); self.send_response(code); self.send_header("content-type", "application/json"); self.send_header("content-length", str(len(body))); self.end_headers(); self.wfile.write(body)
-
-if __name__ == "__main__":
-    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
