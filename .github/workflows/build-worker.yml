@@ -33,5 +33,15 @@ jobs:
           WORKER_IMAGE: ghcr.io/david-t-campos/kindle-app-worker:calibre-9.12.0-v2
         run: |
           docker build --pull --build-arg CALIBRE_VERSION=9.12.0 --tag "$WORKER_IMAGE" worker-runtime
-          docker run --rm --entrypoint /bin/sh "$WORKER_IMAGE" -c 'test -e /usr/share/zoneinfo/UTC && ebook-convert --version && java -jar /opt/epubcheck/epubcheck.jar --version'
+          docker run --rm --entrypoint /bin/sh "$WORKER_IMAGE" -c '
+            set -eu
+            test -e /usr/share/zoneinfo/UTC
+            python3 -c "from zoneinfo import ZoneInfo; ZoneInfo(\"UTC\")"
+            ebook-convert --version
+            java -jar /opt/epubcheck/epubcheck.jar --version
+            printf "%s\n" "<!doctype html><html><head><meta charset=\"utf-8\"><title>Worker test</title></head><body><h1>Worker test</h1><p>This harmless fixture proves the complete conversion engine starts and produces a valid EPUB.</p></body></html>" > /tmp/input.html
+            ebook-convert /tmp/input.html /tmp/output.epub --output-profile kindle_pw3
+            test -s /tmp/output.epub
+            java -jar /opt/epubcheck/epubcheck.jar /tmp/output.epub
+          '
           docker push "$WORKER_IMAGE"
