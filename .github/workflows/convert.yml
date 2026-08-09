@@ -5,9 +5,6 @@ on:
     inputs:
       job_id: { required: true, type: string }
       issued_at: { required: true, type: string }
-      # Kept optional during the zero-downtime backend rollout. It is ignored;
-      # the worker derives a fresh token from the encrypted Actions secret.
-      token: { required: false, type: string }
       origin: { required: true, type: string }
       region: { required: true, type: string }
       calibre_version: { required: true, type: string }
@@ -17,6 +14,7 @@ on:
 permissions:
   contents: read
   packages: read
+  id-token: write
 
 concurrency:
   group: os-meus-livros-${{ inputs.job_id }}
@@ -39,15 +37,6 @@ jobs:
           test "$INPUT_CALIBRE_VERSION" = "9.12.0"
           test "$INPUT_PROFILE_VERSION" = "default-1"
           test "$INPUT_VALIDATOR_VERSION" = "1"
-      - name: Prepare private job authentication
-        env:
-          WORKER_SHARED_SECRET: ${{ secrets.WORKER_SHARED_SECRET }}
-          INPUT_JOB_ID: ${{ inputs.job_id }}
-          INPUT_ISSUED_AT: ${{ inputs.issued_at }}
-        run: |
-          JOB_TOKEN=$(python3 -c 'import base64,hashlib,hmac,os; message=os.environ["INPUT_JOB_ID"]+"."+os.environ["INPUT_ISSUED_AT"]; print(base64.urlsafe_b64encode(hmac.new(os.environ["WORKER_SHARED_SECRET"].encode(), message.encode(), hashlib.sha256).digest()).rstrip(b"=").decode())')
-          echo "::add-mask::$JOB_TOKEN"
-          echo "JOB_TOKEN=$JOB_TOKEN" >> "$GITHUB_ENV"
       - name: Load the prebuilt conversion worker
         env:
           GHCR_TOKEN: ${{ github.token }}
@@ -60,7 +49,6 @@ jobs:
           fi
       - name: Convert, validate, and submit one book
         env:
-          WORKER_SHARED_SECRET: ${{ secrets.WORKER_SHARED_SECRET }}
           APP_ORIGIN: https://os-meus-livros.vercel.app
           INPUT_ORIGIN: ${{ inputs.origin }}
           INPUT_JOB_ID: ${{ inputs.job_id }}
@@ -74,10 +62,11 @@ jobs:
         run: |
           test "$INPUT_ORIGIN" = "$APP_ORIGIN"
           export JOB_PAYLOAD
-          JOB_PAYLOAD=$(python3 -c 'import json,os; print(json.dumps({"job_id":os.environ["INPUT_JOB_ID"],"issued_at":os.environ["INPUT_ISSUED_AT"],"token":os.environ["JOB_TOKEN"],"origin":os.environ["INPUT_ORIGIN"],"region":os.environ["INPUT_REGION"],"calibre_version":os.environ["CALIBRE_VERSION"],"profile_version":os.environ["PROFILE_VERSION"],"validator_version":os.environ["VALIDATOR_VERSION"]},separators=(",",":")))')
+          JOB_PAYLOAD=$(python3 -c 'import json,os; print(json.dumps({"job_id":os.environ["INPUT_JOB_ID"],"issued_at":os.environ["INPUT_ISSUED_AT"],"origin":os.environ["INPUT_ORIGIN"],"region":os.environ["INPUT_REGION"],"calibre_version":os.environ["CALIBRE_VERSION"],"profile_version":os.environ["PROFILE_VERSION"],"validator_version":os.environ["VALIDATOR_VERSION"]},separators=(",",":")))')
           docker run --rm \
             --entrypoint python3 \
-            --env WORKER_SHARED_SECRET \
+            --env ACTIONS_ID_TOKEN_REQUEST_URL \
+            --env ACTIONS_ID_TOKEN_REQUEST_TOKEN \
             --env APP_ORIGIN \
             --env CALIBRE_VERSION \
             --env EPUBCHECK_VERSION \
@@ -88,17 +77,19 @@ jobs:
       - name: Report an infrastructure failure to the app
         if: failure()
         env:
-          WORKER_SHARED_SECRET: ${{ secrets.WORKER_SHARED_SECRET }}
           APP_ORIGIN: https://os-meus-livros.vercel.app
           INPUT_JOB_ID: ${{ inputs.job_id }}
           INPUT_ISSUED_AT: ${{ inputs.issued_at }}
         run: |
+          AUDIENCE=$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote("os-meus-livros:"+os.environ["INPUT_JOB_ID"], safe=""))')
+          OIDC_TOKEN=$(curl --fail-with-body --silent --show-error --max-time 30 \
+            --header "authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')
+          echo "::add-mask::$OIDC_TOKEN"
           STATUS=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 30 \
             --request PATCH \
             --header "content-type: application/json" \
-            --header "x-worker-secret: $WORKER_SHARED_SECRET" \
-            --header "x-job-issued-at: $INPUT_ISSUED_AT" \
-            --header "x-job-token: $JOB_TOKEN" \
+            --header "x-github-oidc-token: $OIDC_TOKEN" \
             --data '{"stage":"DOWNLOAD","detail":"O serviço de conversão não conseguiu iniciar","state":"FAILED","errorCode":"WORKER_IMAGE_UNAVAILABLE"}' \
             "$APP_ORIGIN/api/internal/jobs/$INPUT_JOB_ID/status")
           test "$STATUS" = 200 -o "$STATUS" = 409
