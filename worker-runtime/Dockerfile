@@ -14,6 +14,5 @@ COPY --chown=worker:worker server.py /app/server.py
 COPY --chown=worker:worker run_job.py /app/run_job.py
 USER 10001
 WORKDIR /work
-ENV PORT=8080 HOME=/home/worker
-EXPOSE 8080
-ENTRYPOINT ["python3", "/app/server.py"]
+ENV HOME=/home/worker
+ENTRYPOINT ["python3", "/app/run_job.py"]
