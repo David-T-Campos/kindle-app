@@ -55,7 +55,7 @@ jobs:
             --env ACTIONS_ID_TOKEN_REQUEST_URL \
             --env ACTIONS_ID_TOKEN_REQUEST_TOKEN \
             --env APP_ORIGIN \
-            "$WORKER_IMAGE" -c 'from server import APP_ORIGIN,headers_for; from urllib.request import Request,urlopen; request=Request(APP_ORIGIN+"/api/internal/worker-auth-smoke",headers=headers_for({"jobId":"smoke"}),method="POST"); response=urlopen(request,timeout=30); assert response.status == 200'
+            "$WORKER_IMAGE" -c 'import sys; sys.path.insert(0,"/app"); from server import APP_ORIGIN,headers_for; from urllib.request import Request,urlopen; request=Request(APP_ORIGIN+"/api/internal/worker-auth-smoke",headers=headers_for({"jobId":"smoke"}),method="POST"); response=urlopen(request,timeout=30); assert response.status == 200'
       - name: Publish the verified worker
         env:
           WORKER_IMAGE: ghcr.io/david-t-campos/kindle-app-worker:calibre-9.12.0-v2
