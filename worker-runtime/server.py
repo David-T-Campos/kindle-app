@@ -5,7 +5,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.parse import unquote
 from urllib.error import HTTPError
-import hashlib, json, os, re, subprocess, tempfile, time, unicodedata, zipfile
+import hashlib, json, os, re, shutil, subprocess, tempfile, time, unicodedata, zipfile
 import xml.etree.ElementTree as ET
 
 PORT = int(os.environ.get("PORT", "8080"))
@@ -67,14 +67,19 @@ def download(job, target):
         total = int(response.headers.get("content-length", 0)); disposition = response.headers.get("content-disposition", "")
         match = re.search(r"filename\*=UTF-8''([^;]+)", disposition)
         source_name = unquote(match.group(1)) if match else "source.bin"
+        last_report = time.monotonic(); last_reported_bytes = 0
         while True:
             chunk = response.read(1024 * 1024)
             if not chunk: break
             done += len(chunk)
             if done > MAX_SOURCE: raise PipelineError("SOURCE_TOO_LARGE", "Source exceeds configured limit")
             output.write(chunk); sha.update(chunk)
-            status(job, "DOWNLOAD", f"{done} de {total} bytes" if total else f"{done} bytes")
+            now = time.monotonic()
+            if done - last_reported_bytes >= 5 * 1024 * 1024 or now - last_report >= 2:
+                status(job, "DOWNLOAD", f"{done} de {total} bytes" if total else f"{done} bytes")
+                last_report = now; last_reported_bytes = done
     if done == 0 or (total and done != total): raise PipelineError("TRUNCATED_SOURCE", "Source is empty or truncated")
+    if done != last_reported_bytes: status(job, "DOWNLOAD", f"{done} de {total} bytes" if total else f"{done} bytes")
     safe_zip(target)
     return sha.hexdigest(), done, source_name
 
@@ -108,14 +113,14 @@ def encoding_args(path):
     try: sample.decode("utf-8"); return ["--input-encoding", "utf-8"]
     except UnicodeDecodeError: return ["--input-encoding", "windows-1252"]
 
-def convert(job, source, output, quality=None):
+def convert(job, source, output, quality=None, progress_stage="CONVERT"):
     command = ["timeout", "--signal=TERM", "20m", "ebook-convert", str(source), str(output), "--output-profile", "kindle_pw3", "--change-justification", "original", *encoding_args(source)]
     if quality: command += ["--jpeg-quality", str(quality)]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
     milestones = [("InputFormatPlugin", "A ler o ficheiro original"), ("Parsing all content", "A construir a estrutura do livro"), ("Processing images", "A processar imagens e estilos"), ("Creating EPUB Output", "A criar o novo EPUB"), ("Output saved", "A finalizar o EPUB")]
     for line in iter(process.stdout.readline, ""):
         for marker, detail in milestones:
-            if marker.lower() in line.lower(): status(job, "CONVERT", detail)
+            if marker.lower() in line.lower(): status(job, progress_stage, detail)
     if process.wait() != 0 or not output.exists(): raise PipelineError("CALIBRE_FAILED", "Complete Calibre conversion failed")
 
 def opf_path(archive):
@@ -163,10 +168,10 @@ def epubcheck(path):
     if result.returncode != 0: raise PipelineError("EPUBCHECK_FAILED", json.dumps(report)[:1000])
     return report
 
-def validate(job, source, output):
-    status(job, "VERIFY", "A verificar a estrutura EPUB")
+def validate(job, source, output, announce=True):
+    if announce: status(job, "VERIFY", "A verificar a estrutura EPUB")
     normalize_epub(output); current = inventory(output)
-    status(job, "VERIFY", f'{current["spineCount"]} capítulos na ordem de leitura')
+    if announce: status(job, "VERIFY", f'{current["spineCount"]} capítulos na ordem de leitura')
     if current["replacementCharacters"] or current["suspiciousEncoding"] > 2: raise PipelineError("ENCODING_CORRUPTION", "Suspicious Portuguese encoding remains")
     if current["emptyChapters"]: raise PipelineError("EMPTY_CHAPTERS", ", ".join(current["emptyChapters"][:5]))
     original = inventory(source) if source.suffix.lower() == ".epub" and zipfile.is_zipfile(source) else None
@@ -174,7 +179,7 @@ def validate(job, source, output):
         ratio = current["textChars"] / original["textChars"]
         if ratio < .92: raise PipelineError("TEXT_LOSS", f"Output retains only {ratio:.1%} of source text")
         if current["spineCount"] < max(1, original["spineCount"] - 1): raise PipelineError("CHAPTER_LOSS", "Output lost spine chapters")
-    status(job, "VERIFY", "A validar EPUB 3.3 com EPUBCheck")
+    if announce: status(job, "VERIFY", "A validar EPUB 3.3 com EPUBCheck")
     standards = epubcheck(output)
     return {"source": original, "output": current, "epubcheck": {"version": EPUBCHECK, "messages": len(standards.get("messages", []))}}
 
@@ -184,7 +189,7 @@ def upload(job, output, report):
     api(job, "artifact", "PUT", data, headers); return digest, len(data)
 
 def run(job):
-    started = time.time(); timings = {}
+    started = time.time(); timings = {}; failure_stage = "DOWNLOAD"
     with tempfile.TemporaryDirectory(prefix="oml-") as folder:
         work = Path(folder); source = work / "source.bin"; output = work / "book.epub"
         try:
@@ -192,20 +197,48 @@ def run(job):
             t = time.time(); source_hash, source_size, source_name = download(job, source); timings["downloadMs"] = int((time.time()-t)*1000)
             suffix = Path(source_name).suffix.lower(); source_named = work / f"source{suffix or '.bin'}"; source.rename(source_named); source = source_named
             protected(source); scan(source)
-            status(job, "CONVERT", "A iniciar o Calibre completo", sourceHash=source_hash, sourceSize=source_size)
-            t = time.time(); convert(job, source, output); timings["convertMs"] = int((time.time()-t)*1000)
-            t = time.time(); report = validate(job, source, output); timings["verifyMs"] = int((time.time()-t)*1000)
-            status(job, "PREPARE", "A confirmar tamanho, nome e metadados")
+            failure_stage = "CONVERT"
+            t = time.time()
+            if source.suffix.lower() == ".epub":
+                status(job, "CONVERT", "A verificar se este EPUB já está pronto", sourceHash=source_hash, sourceSize=source_size)
+                shutil.copyfile(source, output)
+                try:
+                    report = validate(job, source, output, announce=False)
+                    status(job, "VERIFY", "EPUB compatível; conversão completa desnecessária")
+                except PipelineError as error:
+                    if error.code in {"INVALID_EPUB", "BROKEN_MANIFEST", "EPUBCHECK_FAILED", "EMPTY_CHAPTERS", "ENCODING_CORRUPTION", "OUTPUT_ENCODING"}:
+                        status(job, "CONVERT", "A reparar o EPUB com Calibre")
+                        output.unlink(missing_ok=True)
+                        convert(job, source, output)
+                        failure_stage = "VERIFY"
+                        report = validate(job, source, output)
+                    else:
+                        raise
+            else:
+                status(job, "CONVERT", "A iniciar o Calibre completo", sourceHash=source_hash, sourceSize=source_size)
+                convert(job, source, output)
+                failure_stage = "VERIFY"
+                report = validate(job, source, output)
+            timings["convertAndVerifyMs"] = int((time.time()-t)*1000)
+            failure_stage = "VERIFY"
             if output.stat().st_size > 24 * 1024 * 1024:
-                optimized = work / "book-optimized.epub"; convert(job, output, optimized, 85); report = validate(job, output, optimized); output = optimized
+                status(job, "VERIFY", "A reduzir imagens para o limite de envio")
+                optimized = work / "book-optimized.epub"; convert(job, output, optimized, 85, "VERIFY"); report = validate(job, output, optimized); output = optimized
             if output.stat().st_size > 24 * 1024 * 1024: raise PipelineError("TOO_LARGE", "Validated EPUB exceeds Gmail's attachment limit")
+            failure_stage = "PREPARE"
+            status(job, "PREPARE", "A confirmar tamanho, nome e metadados")
             ensure_current(job, "artifact upload")
             digest, size = upload(job, output, report); timings["totalMs"] = int((time.time()-started)*1000)
+            failure_stage = "SEND"
             status(job, "SEND", "A construir uma mensagem com um único EPUB", outputSize=size, validation=report, timings=timings)
             ensure_current(job, "email submission")
             api(job, "submit", "POST", {"artifactHash": digest})
         except PipelineError as error:
-            try: status(job, "DOWNLOAD" if not output.exists() else "VERIFY", "O processamento parou em segurança", "FAILED", errorCode=error.code, timings=timings)
+            try: status(job, failure_stage, "O processamento parou em segurança", "FAILED", errorCode=error.code, timings=timings)
+            except Exception: pass
+            raise
+        except Exception as error:
+            try: status(job, failure_stage, "O serviço encontrou um erro inesperado", "FAILED", errorCode="WORKER_INTERNAL_ERROR", timings=timings)
             except Exception: pass
             raise
         finally:
