@@ -1,5 +1,5 @@
 name: Verify five real Drive books without delivery
-# Re-run with explicit EPUB 3 repair output.
+# Re-run with stale-reference and dimension cleanup.
 
 on:
   push:
