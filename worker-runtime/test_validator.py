@@ -12,7 +12,7 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, "/app")
-from server import PipelineError, epubcheck, inventory, validate, validation_summary
+from server import PipelineError, epubcheck, inventory, normalize_content_document, validate, validation_summary
 
 CONTAINER = b'''<?xml version="1.0" encoding="UTF-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -96,6 +96,17 @@ def main():
             return data
         rewrite_epub(iri_source, iri_rewritten, encode_manifest_iri)
         assert inventory(iri_rewritten)["readableSpineItems"] == 1
+
+        cleaned = normalize_content_document(
+            '<p><img src="../image/missing.jpg" alt="Ilustração"/>'
+            '<img src="../image/real.jpg" width="100%" height="auto"/>'
+            '<a href="missing.xhtml">Texto preservado</a></p>',
+            "OEBPS/Text/chapter.xhtml",
+            {"OEBPS/Text/chapter.xhtml", "OEBPS/image/real.jpg"},
+        )
+        assert "missing.jpg" not in cleaned and "Ilustração" in cleaned
+        assert 'width="100%"' not in cleaned and 'height="auto"' not in cleaned
+        assert "missing.xhtml" not in cleaned and "Texto preservado" in cleaned
 
         # Reproduce the production failure: a real-sized inventory exceeds the
         # old 7,000-character header, while the new summary remains valid JSON.
