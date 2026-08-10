@@ -242,7 +242,8 @@ def normalize_content_document(text, document, names):
         reference = re.search(r"\s+(?:src|href|xlink:href)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag, flags=re.IGNORECASE)
         if reference and not local_reference_exists(document, reference.group(1) or reference.group(2), names):
             alt = re.search(r"\s+alt\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag, flags=re.IGNORECASE)
-            return html.escape((alt.group(1) or alt.group(2)) if alt else "")
+            alt_text = (alt.group(1) if alt.group(1) is not None else alt.group(2)) if alt else ""
+            return html.escape(alt_text or "")
         return re.sub(r"\s+(?:width|height)\s*=\s*(?:\"(?!\d+\")[^\"]*\"|'(?!\d+')[^']*')", "", tag, flags=re.IGNORECASE)
 
     text = re.sub(r"<(?:img|(?:[\w.-]+:)?image)\b[^>]*?/?>", media_tag, text, flags=re.IGNORECASE)
