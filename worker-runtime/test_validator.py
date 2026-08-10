@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -79,6 +80,22 @@ def main():
         assert report["readableSpineItems"] == 2
         assert report["spineVisualItems"] == 1
         assert report["emptyChapters"] == ["OEBPS/ARaparigaSemTempo_ebook.xhtml"]
+
+        # Manifest hrefs are IRIs. A percent-escaped path, fragment, and a
+        # canonically equivalent decomposed Unicode ZIP name must all resolve
+        # to the same case-sensitive archive member.
+        iri_source = root / "manifest-iri.epub"
+        decomposed = unicodedata.normalize("NFD", "capítulo.xhtml")
+        write_epub(iri_source, [(decomposed, "<p>Conteúdo real.</p>")])
+        iri_rewritten = root / "manifest-iri-rewritten.epub"
+        def encode_manifest_iri(name, data):
+            if name.lower().endswith(".opf"):
+                text = data.decode("utf-8")
+                text = text.replace(decomposed, "cap%C3%ADtulo.xhtml#inicio")
+                return text.encode("utf-8")
+            return data
+        rewrite_epub(iri_source, iri_rewritten, encode_manifest_iri)
+        assert inventory(iri_rewritten)["readableSpineItems"] == 1
 
         # Reproduce the production failure: a real-sized inventory exceeds the
         # old 7,000-character header, while the new summary remains valid JSON.
