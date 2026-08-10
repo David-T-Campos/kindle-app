@@ -1,5 +1,5 @@
 name: Verify five real Drive books without delivery
-# Re-run after manifest IRI resolution and safe EPUBCheck diagnostics.
+# Re-run after bounded second-pass Calibre normalization.
 
 on:
   push:
