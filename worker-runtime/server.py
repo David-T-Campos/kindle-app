@@ -2,9 +2,9 @@
 """Isolated, single-book Calibre worker for Os Meus Livros."""
 from pathlib import Path
 from urllib.request import Request, urlopen
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlsplit
 from urllib.error import HTTPError, URLError
-import hashlib, html, json, os, re, shutil, subprocess, tempfile, time, unicodedata, zipfile
+import hashlib, html, json, os, posixpath, re, shutil, subprocess, tempfile, time, unicodedata, zipfile
 import xml.etree.ElementTree as ET
 
 APP_ORIGIN = os.environ.get("APP_ORIGIN", "").rstrip("/")
@@ -21,7 +21,10 @@ MAX_JOB_AGE = int(os.environ.get("MAX_JOB_AGE_SECONDS", "1680"))
 STAGES = {"DOWNLOAD", "CONVERT", "VERIFY", "PREPARE", "SEND"}
 
 class PipelineError(Exception):
-    def __init__(self, code, message): super().__init__(message); self.code = code
+    def __init__(self, code, message, diagnostic=None):
+        super().__init__(message)
+        self.code = code
+        self.diagnostic = diagnostic
 
 _oidc_cache = {"token": "", "exp": 0, "audience": ""}
 
@@ -162,12 +165,35 @@ def document_content(raw):
     plain = re.sub(r"\s+", " ", plain.replace("\xa0", " ")).strip()
     return plain, visuals
 
+def manifest_resource_name(package, href, names):
+    """Resolve an OPF manifest IRI to its case-sensitive ZIP member name.
+
+    EPUB manifest hrefs are IRIs, not literal ZIP paths: percent escapes and URL
+    fragments must be resolved before looking in the archive. Some authoring
+    tools also write canonically equivalent decomposed Unicode ZIP names. Match
+    those without accepting case changes or paths outside the archive root.
+    """
+    raw_path = unquote(urlsplit(href).path)
+    if not raw_path or raw_path.startswith("/"):
+        raise PipelineError("BROKEN_MANIFEST", "Manifest contains an empty or absolute resource path", "invalid-manifest-path")
+    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(package), raw_path))
+    if resolved == ".." or resolved.startswith("../"):
+        raise PipelineError("BROKEN_MANIFEST", "Manifest resource escapes the EPUB root", "escaping-manifest-path")
+    if resolved in names:
+        return resolved
+    normalized = unicodedata.normalize("NFC", resolved)
+    matches = [name for name in names if unicodedata.normalize("NFC", name) == normalized]
+    if len(matches) == 1:
+        return matches[0]
+    reason = "ambiguous-unicode-manifest-path" if matches else "missing-manifest-resource"
+    raise PipelineError("BROKEN_MANIFEST", "Manifest resource is missing from the EPUB archive", reason)
+
 def inventory(path):
     safe_zip(path)
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
         if "mimetype" not in names or archive.read("mimetype") != b"application/epub+zip": raise PipelineError("INVALID_EPUB", "Invalid EPUB mimetype")
-        package = opf_path(archive); opf = ET.fromstring(archive.read(package)); base = str(Path(package).parent)
+        package = opf_path(archive); opf = ET.fromstring(archive.read(package))
         manifest = {item.attrib.get("id"): item for item in opf.findall(".//{*}manifest/{*}item")}
         spine = [item.attrib.get("idref") for item in opf.findall(".//{*}spine/{*}itemref")]
         chapters, resources, texts, empty = [], [], [], []
@@ -175,8 +201,7 @@ def inventory(path):
         spine_text_chars = 0
         spine_visual_items = 0
         for ident, item in manifest.items():
-            href = str(Path(base, item.attrib.get("href", ""))).replace("\\", "/").lstrip("./")
-            if href not in names: raise PipelineError("BROKEN_MANIFEST", f"Missing resource: {href}")
+            href = manifest_resource_name(package, item.attrib.get("href", ""), names)
             media = item.attrib.get("media-type", "")
             resources.append((href, media))
             if media in {"application/xhtml+xml", "text/html"}:
@@ -221,7 +246,17 @@ def epubcheck(path):
     result = subprocess.run(["java", "-jar", "/opt/epubcheck/epubcheck.jar", str(path), "--json", "-"], capture_output=True, text=True, timeout=180)
     try: report = json.loads(result.stdout or "{}")
     except json.JSONDecodeError: report = {"raw": result.stdout[-2000:], "stderr": result.stderr[-1000:]}
-    if result.returncode != 0: raise PipelineError("EPUBCHECK_FAILED", json.dumps(report)[:1000])
+    if result.returncode != 0:
+        codes = []
+        for message in report.get("messages", []) if isinstance(report, dict) else []:
+            if not isinstance(message, dict): continue
+            code = message.get("ID") or message.get("id")
+            severity = message.get("severity")
+            if isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_-]{1,30}", code):
+                token = f"{severity}:{code}" if isinstance(severity, str) else code
+                if token not in codes: codes.append(token)
+        diagnostic = "epubcheck:" + ",".join(codes[:12]) if codes else "epubcheck:unclassified"
+        raise PipelineError("EPUBCHECK_FAILED", json.dumps(report)[:1000], diagnostic)
     return report
 
 def validate(job, source, output, announce=True):
@@ -332,7 +367,9 @@ def run(job):
             ensure_current(job, "email submission")
             api(job, "submit", "POST", {"artifactHash": digest})
         except PipelineError as error:
-            try: status(job, failure_stage, "O processamento parou em segurança", "FAILED", errorCode=error.code, timings=timings)
+            detail = "O processamento parou em segurança"
+            if job.get("dryRun") and error.diagnostic: detail += f" [{error.diagnostic}]"
+            try: status(job, failure_stage, detail, "FAILED", errorCode=error.code, timings=timings)
             except Exception: pass
             raise
         except Exception as error:
