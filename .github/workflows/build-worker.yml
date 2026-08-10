@@ -45,6 +45,14 @@ jobs:
             test -s /tmp/output.epub
             java -jar /opt/epubcheck/epubcheck.jar /tmp/output.epub
           '
+      - name: Exercise real EPUB validator regressions
+        env:
+          WORKER_IMAGE: ghcr.io/david-t-campos/kindle-app-worker:calibre-9.12.0-v2
+        run: |
+          docker run --rm \
+            --entrypoint python3 \
+            --volume "$PWD/worker-runtime/test_validator.py:/tmp/test_validator.py:ro" \
+            "$WORKER_IMAGE" /tmp/test_validator.py
       - name: Prove the published worker can authenticate to production
         env:
           APP_ORIGIN: https://os-meus-livros.vercel.app

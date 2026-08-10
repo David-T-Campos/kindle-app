@@ -4,7 +4,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.parse import quote, unquote
 from urllib.error import HTTPError, URLError
-import hashlib, json, os, re, shutil, subprocess, tempfile, time, unicodedata, zipfile
+import hashlib, html, json, os, re, shutil, subprocess, tempfile, time, unicodedata, zipfile
 import xml.etree.ElementTree as ET
 
 APP_ORIGIN = os.environ.get("APP_ORIGIN", "").rstrip("/")
@@ -151,6 +151,17 @@ def opf_path(archive):
     if node is None: raise PipelineError("INVALID_EPUB", "Missing package document")
     return node.attrib["full-path"]
 
+def document_content(raw):
+    """Return visible body text and visual elements from one HTML spine item."""
+    body = re.search(r"<body\b[^>]*>(.*?)</body\s*>", raw, flags=re.IGNORECASE | re.DOTALL)
+    content = body.group(1) if body else raw
+    content = re.sub(r"<!--.*?-->", " ", content, flags=re.DOTALL)
+    content = re.sub(r"<(script|style|noscript)\b[^>]*>.*?</\1\s*>", " ", content, flags=re.IGNORECASE | re.DOTALL)
+    visuals = len(re.findall(r"<(?:img|image|svg|canvas|video|object)\b", content, flags=re.IGNORECASE))
+    plain = html.unescape(re.sub(r"<[^>]+>", " ", content))
+    plain = re.sub(r"\s+", " ", plain.replace("\xa0", " ")).strip()
+    return plain, visuals
+
 def inventory(path):
     safe_zip(path)
     with zipfile.ZipFile(path) as archive:
@@ -160,16 +171,28 @@ def inventory(path):
         manifest = {item.attrib.get("id"): item for item in opf.findall(".//{*}manifest/{*}item")}
         spine = [item.attrib.get("idref") for item in opf.findall(".//{*}spine/{*}itemref")]
         chapters, resources, texts, empty = [], [], [], []
+        readable_spine_items = 0
+        spine_text_chars = 0
+        spine_visual_items = 0
         for ident, item in manifest.items():
             href = str(Path(base, item.attrib.get("href", ""))).replace("\\", "/").lstrip("./")
             if href not in names: raise PipelineError("BROKEN_MANIFEST", f"Missing resource: {href}")
             media = item.attrib.get("media-type", "")
             resources.append((href, media))
             if media in {"application/xhtml+xml", "text/html"}:
-                raw = archive.read(href).decode("utf-8", "replace"); plain = re.sub(r"<[^>]+>", " ", raw); plain = re.sub(r"\s+", " ", plain).strip(); texts.append(plain)
-                if ident in spine: chapters.append(href); empty += [href] if len(plain) < 20 else []
+                raw = archive.read(href).decode("utf-8", "replace")
+                plain, visuals = document_content(raw)
+                texts.append(plain)
+                if ident in spine:
+                    chapters.append(href)
+                    spine_text_chars += len(plain)
+                    spine_visual_items += int(visuals > 0)
+                    if re.search(r"\w", plain, flags=re.UNICODE) or visuals:
+                        readable_spine_items += 1
+                    else:
+                        empty.append(href)
         joined = "\n".join(texts); suspicious = sum(joined.count(x) for x in ("�", "Ã£", "Ã©", "Ã§", "â€œ", "â€™"))
-        return {"package": package, "manifestCount": len(manifest), "spineCount": len(spine), "chapters": chapters, "resources": resources, "textChars": len(joined), "paragraphs": len(re.findall(r"\n|[.!?]\s", joined)), "emptyChapters": empty, "suspiciousEncoding": suspicious, "replacementCharacters": joined.count("�")}
+        return {"package": package, "manifestCount": len(manifest), "spineCount": len(spine), "chapters": chapters, "resources": resources, "textChars": len(joined), "paragraphs": len(re.findall(r"\n|[.!?]\s", joined)), "emptyChapters": empty, "readableSpineItems": readable_spine_items, "spineTextChars": spine_text_chars, "spineVisualItems": spine_visual_items, "suspiciousEncoding": suspicious, "replacementCharacters": joined.count("�")}
 
 def normalize_epub(path):
     temp = path.with_suffix(".nfc.epub")
@@ -196,7 +219,10 @@ def validate(job, source, output, announce=True):
     normalize_epub(output); current = inventory(output)
     if announce: status(job, "VERIFY", f'{current["spineCount"]} capítulos na ordem de leitura')
     if current["replacementCharacters"] or current["suspiciousEncoding"] > 2: raise PipelineError("ENCODING_CORRUPTION", "Suspicious Portuguese encoding remains")
-    if current["emptyChapters"]: raise PipelineError("EMPTY_CHAPTERS", ", ".join(current["emptyChapters"][:5]))
+    # Legal EPUB reading orders may contain covers, image-only pages, section
+    # dividers, and intentional blanks. Reject only an entirely contentless
+    # reading order; individual blank/support pages are diagnostic information.
+    if not current["readableSpineItems"]: raise PipelineError("EMPTY_CHAPTERS", "The reading order contains no readable text or images")
     original = inventory(source) if source.suffix.lower() == ".epub" and zipfile.is_zipfile(source) else None
     if original and original["textChars"] > 1000:
         ratio = current["textChars"] / original["textChars"]
