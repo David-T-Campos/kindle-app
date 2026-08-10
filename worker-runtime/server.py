@@ -140,7 +140,7 @@ def encoding_args(path):
     except UnicodeDecodeError: return ["--input-encoding", "windows-1252"]
 
 def convert(job, source, output, quality=None, progress_stage="CONVERT"):
-    command = ["timeout", "--signal=TERM", "20m", "ebook-convert", str(source), str(output), "--output-profile", "kindle_pw3", "--change-justification", "original", *encoding_args(source)]
+    command = ["timeout", "--signal=TERM", "20m", "ebook-convert", str(source), str(output), "--output-profile", "kindle_pw3", "--epub-version", "3", "--change-justification", "original", *encoding_args(source)]
     if quality: command += ["--jpeg-quality", str(quality)]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
     milestones = [("InputFormatPlugin", "A ler o ficheiro original"), ("Parsing all content", "A construir a estrutura do livro"), ("Processing images", "A processar imagens e estilos"), ("Creating EPUB Output", "A criar o novo EPUB"), ("Output saved", "A finalizar o EPUB")]
