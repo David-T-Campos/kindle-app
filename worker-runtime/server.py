@@ -248,6 +248,7 @@ def epubcheck(path):
     except json.JSONDecodeError: report = {"raw": result.stdout[-2000:], "stderr": result.stderr[-1000:]}
     if result.returncode != 0:
         codes = []
+        details = []
         for message in report.get("messages", []) if isinstance(report, dict) else []:
             if not isinstance(message, dict): continue
             code = message.get("ID") or message.get("id")
@@ -255,7 +256,14 @@ def epubcheck(path):
             if isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_-]{1,30}", code):
                 token = f"{severity}:{code}" if isinstance(severity, str) else code
                 if token not in codes: codes.append(token)
-        diagnostic = "epubcheck:" + ",".join(codes[:12]) if codes else "epubcheck:unclassified"
+            detail = message.get("message")
+            if isinstance(detail, str):
+                detail = re.sub(r"\s+", " ", detail).strip()
+                detail = re.sub(r"/(?:work|tmp)/[^\s\"']+", "<temporary-path>", detail)
+                if detail and detail not in details: details.append(detail)
+        diagnostic = "epubcheck:" + (",".join(codes[:12]) if codes else "unclassified")
+        if details: diagnostic += " | " + " | ".join(details[:3])
+        diagnostic = diagnostic[:450]
         raise PipelineError("EPUBCHECK_FAILED", json.dumps(report)[:1000], diagnostic)
     return report
 
