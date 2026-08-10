@@ -291,9 +291,9 @@ def convert_and_validate(job, source, output, work):
     except PipelineError as error:
         if error.code != "EPUBCHECK_FAILED":
             raise
-        status(job, "CONVERT", "A normalizar novamente o EPUB reparado")
+        status(job, "VERIFY", "A normalizar novamente o EPUB reparado")
         normalized = work / "book-normalized.epub"
-        convert(job, output, normalized)
+        convert(job, output, normalized, progress_stage="VERIFY")
         report = validate(job, output, normalized)
         normalized.replace(output)
         return report
