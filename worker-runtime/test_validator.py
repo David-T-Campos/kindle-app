@@ -11,7 +11,7 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, "/app")
-from server import PipelineError, epubcheck, inventory, validate
+from server import PipelineError, epubcheck, inventory, validate, validation_summary
 
 CONTAINER = b'''<?xml version="1.0" encoding="UTF-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -79,6 +79,18 @@ def main():
         assert report["readableSpineItems"] == 2
         assert report["spineVisualItems"] == 1
         assert report["emptyChapters"] == ["OEBPS/ARaparigaSemTempo_ebook.xhtml"]
+
+        # Reproduce the production failure: a real-sized inventory exceeds the
+        # old 7,000-character header, while the new summary remains valid JSON.
+        large_inventory = dict(report)
+        large_inventory["chapters"] = [f"OEBPS/Section{index:04}.xhtml" for index in range(200)]
+        large_inventory["resources"] = [[name, "application/xhtml+xml"] for name in large_inventory["chapters"]]
+        full_report = {"source": large_inventory, "output": large_inventory, "epubcheck": {"version": "5.3.0", "messages": 0}}
+        assert len(str(full_report)) > 7000
+        summary, encoded = validation_summary(full_report)
+        assert len(encoded.encode("ascii")) < 4096
+        assert summary["output"]["spineCount"] == report["spineCount"]
+        assert summary["output"]["blankSpineItems"] == 1
 
         image_only = root / "image-only.epub"
         write_epub(image_only, [

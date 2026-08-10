@@ -16,4 +16,5 @@ run({
     "calibreVersion": inputs["calibre_version"],
     "profileVersion": inputs["profile_version"],
     "validatorVersion": inputs["validator_version"],
+    "dryRun": bool(inputs.get("dry_run", False)),
 })

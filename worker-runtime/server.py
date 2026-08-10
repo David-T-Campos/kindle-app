@@ -242,10 +242,46 @@ def validate(job, source, output, announce=True):
     standards = epubcheck(output)
     return {"source": original, "output": current, "epubcheck": {"version": EPUBCHECK, "messages": len(standards.get("messages", []))}}
 
+def validation_summary(report):
+    """Return the small, stable report accepted by the artifact API.
+
+    Full inventories contain every chapter and resource path and can be tens of
+    kilobytes long. They must never be truncated into an HTTP header because a
+    character slice can produce invalid JSON. Keep only aggregate evidence and
+    prove the exact serialized payload is valid and bounded before uploading.
+    """
+    numeric_fields = (
+        "manifestCount", "spineCount", "textChars", "paragraphs",
+        "readableSpineItems", "spineTextChars", "spineVisualItems",
+        "suspiciousEncoding", "replacementCharacters",
+    )
+
+    def compact(inventory):
+        if inventory is None:
+            return None
+        summary = {field: int(inventory.get(field, 0)) for field in numeric_fields}
+        summary["blankSpineItems"] = len(inventory.get("emptyChapters", []))
+        return summary
+
+    summary = {
+        "schemaVersion": 1,
+        "source": compact(report.get("source")),
+        "output": compact(report.get("output")),
+        "epubcheck": {
+            "version": str(report.get("epubcheck", {}).get("version", EPUBCHECK)),
+            "messages": int(report.get("epubcheck", {}).get("messages", 0)),
+        },
+    }
+    encoded = json.dumps(summary, separators=(",", ":"), ensure_ascii=True)
+    if len(encoded.encode("ascii")) > 4096 or json.loads(encoded) != summary:
+        raise PipelineError("VALIDATION_SUMMARY_INVALID", "Validation summary could not be serialized safely")
+    return summary, encoded
+
 def upload(job, output, report):
     data = output.read_bytes(); digest = hashlib.sha256(data).hexdigest()
-    headers = {"content-type": "application/epub+zip", "content-length": str(len(data)), "x-content-sha256": digest, "x-validation-summary": json.dumps(report, separators=(",", ":"))[:7000]}
-    api(job, "artifact", "PUT", data, headers); return digest, len(data)
+    summary, encoded = validation_summary(report)
+    headers = {"content-type": "application/epub+zip", "content-length": str(len(data)), "x-content-sha256": digest, "x-validation-summary": encoded}
+    api(job, "artifact", "PUT", data, headers); return digest, len(data), summary
 
 def run(job):
     started = time.time(); timings = {}; failure_stage = "DOWNLOAD"
@@ -287,9 +323,12 @@ def run(job):
             failure_stage = "PREPARE"
             status(job, "PREPARE", "A confirmar tamanho, nome e metadados")
             ensure_current(job, "artifact upload")
-            digest, size = upload(job, output, report); timings["totalMs"] = int((time.time()-started)*1000)
+            digest, size, summary = upload(job, output, report); timings["totalMs"] = int((time.time()-started)*1000)
             failure_stage = "SEND"
-            status(job, "SEND", "A construir uma mensagem com um único EPUB", outputSize=size, validation=report, timings=timings)
+            if job.get("dryRun"):
+                status(job, "SUBMITTED", "Teste concluído sem enviar email nem livro", "SUBMITTED", outputSize=size, validation=summary, timings=timings)
+                return
+            status(job, "SEND", "A construir uma mensagem com um único EPUB", outputSize=size, validation=summary, timings=timings)
             ensure_current(job, "email submission")
             api(job, "submit", "POST", {"artifactHash": digest})
         except PipelineError as error:
