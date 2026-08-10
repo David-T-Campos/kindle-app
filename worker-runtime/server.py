@@ -277,6 +277,27 @@ def validate(job, source, output, announce=True):
     standards = epubcheck(output)
     return {"source": original, "output": current, "epubcheck": {"version": EPUBCHECK, "messages": len(standards.get("messages", []))}}
 
+def convert_and_validate(job, source, output, work):
+    """Convert once, then do one bounded normalization pass for invalid XML.
+
+    Calibre can preserve malformed embedded markup or stale resource references
+    from an input EPUB during its first repair. Re-importing that generated EPUB
+    makes Calibre parse its own package and removes those defects. Validation
+    compares both passes, so text or chapter loss still fails closed.
+    """
+    convert(job, source, output)
+    try:
+        return validate(job, source, output)
+    except PipelineError as error:
+        if error.code != "EPUBCHECK_FAILED":
+            raise
+        status(job, "CONVERT", "A normalizar novamente o EPUB reparado")
+        normalized = work / "book-normalized.epub"
+        convert(job, output, normalized)
+        report = validate(job, output, normalized)
+        normalized.replace(output)
+        return report
+
 def validation_summary(report):
     """Return the small, stable report accepted by the artifact API.
 
@@ -339,16 +360,14 @@ def run(job):
                     if error.code in {"INVALID_EPUB", "BROKEN_MANIFEST", "EPUBCHECK_FAILED", "EMPTY_CHAPTERS", "ENCODING_CORRUPTION", "OUTPUT_ENCODING"}:
                         status(job, "CONVERT", "A reparar o EPUB com Calibre")
                         output.unlink(missing_ok=True)
-                        convert(job, source, output)
                         failure_stage = "VERIFY"
-                        report = validate(job, source, output)
+                        report = convert_and_validate(job, source, output, work)
                     else:
                         raise
             else:
                 status(job, "CONVERT", "A iniciar o Calibre completo", sourceHash=source_hash, sourceSize=source_size)
-                convert(job, source, output)
                 failure_stage = "VERIFY"
-                report = validate(job, source, output)
+                report = convert_and_validate(job, source, output, work)
             timings["convertAndVerifyMs"] = int((time.time()-t)*1000)
             failure_stage = "VERIFY"
             if output.stat().st_size > 24 * 1024 * 1024:
