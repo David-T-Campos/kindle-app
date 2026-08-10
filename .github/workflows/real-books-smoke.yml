@@ -1,5 +1,5 @@
 name: Verify five real Drive books without delivery
-# Re-run with privacy-safe production failure diagnostics enabled.
+# Re-run after manifest IRI resolution and safe EPUBCheck diagnostics.
 
 on:
   push:
