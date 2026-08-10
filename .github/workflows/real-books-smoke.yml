@@ -1,4 +1,5 @@
 name: Verify five real Drive books without delivery
+# Re-run after the production backend accepted this workflow's push identity.
 
 on:
   push:
