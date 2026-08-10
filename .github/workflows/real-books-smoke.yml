@@ -1,5 +1,5 @@
 name: Verify five real Drive books without delivery
-# Re-run after bounded second-pass Calibre normalization.
+# Re-run after monotonic second-pass repair progress.
 
 on:
   push:
