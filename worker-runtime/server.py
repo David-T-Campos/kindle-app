@@ -226,9 +226,49 @@ def remove_forbidden_root_id(text):
     cleaned = re.sub(r"\s+id\s*=\s*(?:\"[^\"]*\"|'[^']*')", "", root.group(0), count=1, flags=re.IGNORECASE)
     return text[:root.start()] + cleaned + text[root.end():]
 
+def local_reference_exists(document, reference, names):
+    """Return whether an internal document reference resolves in the archive."""
+    parsed = urlsplit(html.unescape(reference.strip()))
+    if parsed.scheme or parsed.netloc or not parsed.path:
+        return True
+    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(document), unquote(parsed.path)))
+    normalized = unicodedata.normalize("NFC", resolved)
+    return any(unicodedata.normalize("NFC", name) == normalized for name in names)
+
+def normalize_content_document(text, document, names):
+    """Remove only broken local references and invalid HTML dimensions."""
+    def media_tag(match):
+        tag = match.group(0)
+        reference = re.search(r"\s+(?:src|href|xlink:href)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag, flags=re.IGNORECASE)
+        if reference and not local_reference_exists(document, reference.group(1) or reference.group(2), names):
+            alt = re.search(r"\s+alt\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag, flags=re.IGNORECASE)
+            return html.escape((alt.group(1) or alt.group(2)) if alt else "")
+        return re.sub(r"\s+(?:width|height)\s*=\s*(?:\"(?!\d+\")[^\"]*\"|'(?!\d+')[^']*')", "", tag, flags=re.IGNORECASE)
+
+    text = re.sub(r"<(?:img|(?:[\w.-]+:)?image)\b[^>]*?/?>", media_tag, text, flags=re.IGNORECASE)
+
+    def link_tag(match):
+        tag = match.group(0)
+        reference = re.search(r"\s+href\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag, flags=re.IGNORECASE)
+        if reference and not local_reference_exists(document, reference.group(1) or reference.group(2), names):
+            return ""
+        return tag
+
+    text = re.sub(r"<link\b[^>]*?/?>", link_tag, text, flags=re.IGNORECASE)
+
+    def anchor_tag(match):
+        tag = match.group(0)
+        reference = re.search(r"\s+href\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag, flags=re.IGNORECASE)
+        if reference and not local_reference_exists(document, reference.group(1) or reference.group(2), names):
+            return re.sub(r"\s+href\s*=\s*(?:\"[^\"]*\"|'[^']*')", "", tag, count=1, flags=re.IGNORECASE)
+        return tag
+
+    return re.sub(r"<a\b[^>]*>", anchor_tag, text, flags=re.IGNORECASE)
+
 def normalize_epub(path):
     temp = path.with_suffix(".nfc.epub")
     with zipfile.ZipFile(path) as source, zipfile.ZipFile(temp, "w") as output:
+        names = set(source.namelist())
         output.writestr("mimetype", b"application/epub+zip", compress_type=zipfile.ZIP_STORED)
         for info in source.infolist():
             if info.filename == "mimetype": continue
@@ -236,7 +276,11 @@ def normalize_epub(path):
             if info.filename.lower().endswith((".xhtml", ".html", ".htm", ".css", ".opf", ".ncx", ".xml")):
                 try:
                     text = unicodedata.normalize("NFC", data.decode("utf-8"))
-                    if info.filename.lower().endswith((".xhtml", ".html", ".htm")): text = remove_forbidden_root_id(text)
+                    if info.filename.lower().endswith((".xhtml", ".html", ".htm")):
+                        text = remove_forbidden_root_id(text)
+                        text = normalize_content_document(text, info.filename, names)
+                    if info.filename.lower().endswith(".opf"):
+                        text = re.sub(r"\s+linear\s*=\s*(?:\"no\"|'no')", "", text, flags=re.IGNORECASE)
                     data = text.encode("utf-8")
                 except UnicodeDecodeError: raise PipelineError("OUTPUT_ENCODING", f"Non-UTF-8 resource: {info.filename}")
             output.writestr(info, data)
