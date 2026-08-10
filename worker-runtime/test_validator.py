@@ -118,6 +118,12 @@ def main():
         report = validate({}, malformed, repaired, announce=False)
         assert report["output"]["readableSpineItems"] > 0
         assert report["epubcheck"]["version"] == "5.3.0"
+        with zipfile.ZipFile(repaired) as archive:
+            for name in archive.namelist():
+                if name.lower().endswith((".xhtml", ".html")):
+                    text = archive.read(name).decode("utf-8")
+                    root = re.search(r"<html\b[^>]*>", text, flags=re.IGNORECASE)
+                    assert not root or not re.search(r"\s+id\s*=", root.group(0), flags=re.IGNORECASE)
 
     print("validator regression fixtures passed")
 

@@ -194,6 +194,13 @@ def inventory(path):
         joined = "\n".join(texts); suspicious = sum(joined.count(x) for x in ("�", "Ã£", "Ã©", "Ã§", "â€œ", "â€™"))
         return {"package": package, "manifestCount": len(manifest), "spineCount": len(spine), "chapters": chapters, "resources": resources, "textChars": len(joined), "paragraphs": len(re.findall(r"\n|[.!?]\s", joined)), "emptyChapters": empty, "readableSpineItems": readable_spine_items, "spineTextChars": spine_text_chars, "spineVisualItems": spine_visual_items, "suspiciousEncoding": suspicious, "replacementCharacters": joined.count("�")}
 
+def remove_forbidden_root_id(text):
+    """Remove an XHTML root id that EPUBCheck rejects, preserving all child ids."""
+    root = re.search(r"<(?:[\w.-]+:)?html\b[^>]*>", text, flags=re.IGNORECASE)
+    if not root: return text
+    cleaned = re.sub(r"\s+id\s*=\s*(?:\"[^\"]*\"|'[^']*')", "", root.group(0), count=1, flags=re.IGNORECASE)
+    return text[:root.start()] + cleaned + text[root.end():]
+
 def normalize_epub(path):
     temp = path.with_suffix(".nfc.epub")
     with zipfile.ZipFile(path) as source, zipfile.ZipFile(temp, "w") as output:
@@ -202,7 +209,10 @@ def normalize_epub(path):
             if info.filename == "mimetype": continue
             data = source.read(info.filename)
             if info.filename.lower().endswith((".xhtml", ".html", ".htm", ".css", ".opf", ".ncx", ".xml")):
-                try: data = unicodedata.normalize("NFC", data.decode("utf-8")).encode("utf-8")
+                try:
+                    text = unicodedata.normalize("NFC", data.decode("utf-8"))
+                    if info.filename.lower().endswith((".xhtml", ".html", ".htm")): text = remove_forbidden_root_id(text)
+                    data = text.encode("utf-8")
                 except UnicodeDecodeError: raise PipelineError("OUTPUT_ENCODING", f"Non-UTF-8 resource: {info.filename}")
             output.writestr(info, data)
     temp.replace(path)
