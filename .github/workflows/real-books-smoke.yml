@@ -1,5 +1,5 @@
 name: Verify five real Drive books without delivery
-# Re-run after monotonic second-pass repair progress.
+# Re-run with private exact EPUBCheck diagnostics.
 
 on:
   push:
