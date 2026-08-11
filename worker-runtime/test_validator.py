@@ -172,6 +172,23 @@ def main():
         # script tag after js/kobo.js has disappeared from the package. The
         # missing resource triggers RSC-007, and the surviving script triggers
         # OPF-014 unless the manifest is synchronized with the repaired XHTML.
+        # Use an explicit EPUB 3 base because the `scripted` manifest property
+        # and this missing-script validation are EPUB 3 rules; Calibre's default
+        # EPUB 2 output would make this regression fixture a false negative.
+        kobo_clean = root / "kobo-clean.epub"
+        subprocess.run(
+            [
+                "ebook-convert",
+                str(html_source),
+                str(kobo_clean),
+                "--output-profile",
+                "kindle_pw3",
+                "--epub-version",
+                "3",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
         kobo = root / "kobo-missing-script.epub"
         def add_missing_kobo_script(name, data):
             if name.lower().endswith((".xhtml", ".html")) and b"<body" in data:
@@ -182,7 +199,7 @@ def main():
                 )
                 return text.encode("utf-8")
             return data
-        rewrite_epub(clean, kobo, add_missing_kobo_script)
+        rewrite_epub(kobo_clean, kobo, add_missing_kobo_script)
         require_pipeline_error("EPUBCHECK_FAILED", lambda: epubcheck(kobo))
         normalize_epub(kobo)
         epubcheck(kobo)
@@ -203,7 +220,7 @@ def main():
                     1,
                 ).encode("utf-8")
             return data
-        rewrite_epub(clean, inline_script, add_inline_script)
+        rewrite_epub(kobo_clean, inline_script, add_inline_script)
         require_pipeline_error("EPUBCHECK_FAILED", lambda: epubcheck(inline_script))
         normalize_epub(inline_script)
         epubcheck(inline_script)
