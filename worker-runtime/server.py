@@ -237,6 +237,20 @@ def local_reference_exists(document, reference, names):
 
 def normalize_content_document(text, document, names):
     """Repair bounded, content-preserving XHTML conformance defects."""
+    def script_block(match):
+        tag = match.group(0)
+        reference = re.search(r"<script\b[^>]*\ssrc\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag, flags=re.IGNORECASE)
+        if reference and not local_reference_exists(document, reference.group(1) or reference.group(2), names):
+            return ""
+        return tag
+
+    # Kobo and other vendor EPUBs sometimes retain loader tags after the
+    # referenced JavaScript file has been omitted. A missing script cannot run
+    # or contribute visible book content, but EPUBCheck correctly rejects the
+    # broken reference and then also requires a misleading scripted manifest
+    # property. Remove only script elements whose local source is absent.
+    text = re.sub(r"<script\b[^>]*>.*?</script\s*>", script_block, text, flags=re.IGNORECASE | re.DOTALL)
+
     def media_tag(match):
         tag = match.group(0)
         reference = re.search(r"\s+(?:src|href|xlink:href)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag, flags=re.IGNORECASE)
@@ -272,6 +286,31 @@ def normalize_content_document(text, document, names):
 
     text = re.sub(r"<a\b[^>]*>", anchor_tag, text, flags=re.IGNORECASE)
     return normalize_inline_block_nesting(text)
+
+def normalize_scripted_manifest(text, package, scripted_documents):
+    """Make each XHTML manifest item's scripted property match its content."""
+    def manifest_item(match):
+        tag = match.group(0)
+        href_match = re.search(r"\shref\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag, flags=re.IGNORECASE)
+        if not href_match:
+            return tag
+        raw_path = unquote(urlsplit(href_match.group(1) or href_match.group(2)).path)
+        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(package), raw_path))
+        normalized = unicodedata.normalize("NFC", resolved)
+        is_scripted = any(unicodedata.normalize("NFC", name) == normalized for name in scripted_documents)
+        properties = re.search(r"\sproperties\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag, flags=re.IGNORECASE)
+        tokens = (properties.group(1) if properties and properties.group(1) is not None else properties.group(2) if properties else "").split()
+        tokens = [token for token in tokens if token != "scripted"]
+        if is_scripted:
+            tokens.append("scripted")
+        if properties:
+            replacement = f' properties="{" ".join(tokens)}"' if tokens else ""
+            return tag[:properties.start()] + replacement + tag[properties.end():]
+        if not tokens:
+            return tag
+        return re.sub(r"\s*/?>$", lambda ending: f' properties="scripted"{ending.group(0)}', tag, count=1)
+
+    return re.sub(r"<(?:[\w.-]+:)?item\b[^>]*?/?>", manifest_item, text, flags=re.IGNORECASE)
 
 def normalize_inline_block_nesting(text):
     """Replace only block tags illegally nested in phrasing-only elements.
@@ -330,9 +369,10 @@ def normalize_inline_block_nesting(text):
 
 def normalize_epub(path):
     temp = path.with_suffix(".nfc.epub")
-    with zipfile.ZipFile(path) as source, zipfile.ZipFile(temp, "w") as output:
+    with zipfile.ZipFile(path) as source:
         names = set(source.namelist())
-        output.writestr("mimetype", b"application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        entries = []
+        scripted_documents = set()
         for info in source.infolist():
             if info.filename == "mimetype": continue
             data = source.read(info.filename)
@@ -342,10 +382,23 @@ def normalize_epub(path):
                     if info.filename.lower().endswith((".xhtml", ".html", ".htm")):
                         text = remove_forbidden_root_id(text)
                         text = normalize_content_document(text, info.filename, names)
+                        if re.search(r"<script\b", text, flags=re.IGNORECASE):
+                            scripted_documents.add(info.filename)
                     if info.filename.lower().endswith(".opf"):
                         text = re.sub(r"\s+linear\s*=\s*(?:\"no\"|'no')", "", text, flags=re.IGNORECASE)
                     data = text.encode("utf-8")
                 except UnicodeDecodeError: raise PipelineError("OUTPUT_ENCODING", f"Non-UTF-8 resource: {info.filename}")
+            entries.append((info, data))
+
+        for index, (info, data) in enumerate(entries):
+            if info.filename.lower().endswith(".opf"):
+                text = data.decode("utf-8")
+                data = normalize_scripted_manifest(text, info.filename, scripted_documents).encode("utf-8")
+                entries[index] = (info, data)
+
+    with zipfile.ZipFile(temp, "w") as output:
+        output.writestr("mimetype", b"application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        for info, data in entries:
             output.writestr(info, data)
     temp.replace(path)
 

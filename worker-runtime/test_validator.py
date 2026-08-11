@@ -168,6 +168,51 @@ def main():
             assert "<p>Introdução <h1" not in chapter
             assert "<img" in chapter and 'alt=""' in chapter
 
+        # Reproduce the second real failure: a Kobo navigation document keeps a
+        # script tag after js/kobo.js has disappeared from the package. The
+        # missing resource triggers RSC-007, and the surviving script triggers
+        # OPF-014 unless the manifest is synchronized with the repaired XHTML.
+        kobo = root / "kobo-missing-script.epub"
+        def add_missing_kobo_script(name, data):
+            if name.lower().endswith((".xhtml", ".html")) and b"<body" in data:
+                text = data.decode("utf-8").replace(
+                    "</body>",
+                    '<script type="text/javascript" src="js/kobo.js"></script></body>',
+                    1,
+                )
+                return text.encode("utf-8")
+            return data
+        rewrite_epub(clean, kobo, add_missing_kobo_script)
+        require_pipeline_error("EPUBCHECK_FAILED", lambda: epubcheck(kobo))
+        normalize_epub(kobo)
+        epubcheck(kobo)
+        with zipfile.ZipFile(kobo) as archive:
+            documents = [archive.read(name).decode("utf-8") for name in archive.namelist() if name.lower().endswith((".xhtml", ".html"))]
+            package = archive.read("content.opf").decode("utf-8")
+            assert all("js/kobo.js" not in document for document in documents)
+            assert 'properties="scripted"' not in package
+
+        # Valid embedded scripting is retained and declared rather than
+        # discarded merely to satisfy EPUBCheck.
+        inline_script = root / "inline-script.epub"
+        def add_inline_script(name, data):
+            if name.lower().endswith((".xhtml", ".html")) and b"<body" in data:
+                return data.decode("utf-8").replace(
+                    "</body>",
+                    '<script type="text/javascript">document.body.dataset.ready = "1";</script></body>',
+                    1,
+                ).encode("utf-8")
+            return data
+        rewrite_epub(clean, inline_script, add_inline_script)
+        require_pipeline_error("EPUBCHECK_FAILED", lambda: epubcheck(inline_script))
+        normalize_epub(inline_script)
+        epubcheck(inline_script)
+        with zipfile.ZipFile(inline_script) as archive:
+            documents = [archive.read(name).decode("utf-8") for name in archive.namelist() if name.lower().endswith((".xhtml", ".html"))]
+            package = archive.read("content.opf").decode("utf-8")
+            assert any("document.body.dataset.ready" in document for document in documents)
+            assert 'properties="scripted"' in package
+
         malformed = root / "sonhos-proibidos-malformed.epub"
         def break_epub(name, data):
             if name.lower().endswith(".opf"):
