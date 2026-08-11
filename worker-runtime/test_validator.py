@@ -152,7 +152,13 @@ def main():
         def add_invalid_nesting(name, data):
             if name.lower().endswith((".xhtml", ".html")) and b"<body" in data and b"<h1" in data:
                 text = data.decode("utf-8")
-                text = re.sub(r"(<h1\b[^>]*>.*?</h1>)", r"<p>Introdução \1 continuação.</p>", text, count=1, flags=re.DOTALL)
+                text = re.sub(
+                    r"(<h1\b[^>]*>.*?</h1>)",
+                    r'<p>Introdução \1 continuação.<li class="toc-entry">Entrada preservada</li></p>',
+                    text,
+                    count=1,
+                    flags=re.DOTALL,
+                )
                 text = re.sub(r"(<img\b[^>]*?)\s+alt\s*=\s*(?:\"[^\"]*\"|'[^']*')", r"\1", text, count=1, flags=re.IGNORECASE)
                 text = re.sub(r"(<img\b[^>]*?/?>)", r"<p>\1</p>", text, count=1, flags=re.IGNORECASE)
                 return text.encode("utf-8")
@@ -166,6 +172,8 @@ def main():
             chapter = next(text for text in chapters if "Livro da Silvia" in text)
             assert "Introdução" in chapter and "continuação." in chapter
             assert "<p>Introdução <h1" not in chapter
+            assert "Entrada preservada" in chapter
+            assert '<span class="toc-entry">' in chapter
             assert "<img" in chapter and 'alt=""' in chapter
 
         # Reproduce the second real failure: a Kobo navigation document keeps a

@@ -64,8 +64,18 @@ def main():
 
     server.status = lambda *_args, **_kwargs: None
     server.api = no_network
+    failures = []
     for slot, value in enumerate(sys.argv[1:], start=1):
-        verify(slot, Path(value))
+        try:
+            verify(slot, Path(value))
+        except Exception as error:
+            code = error.code if isinstance(error, server.PipelineError) else type(error).__name__
+            diagnostic = error.diagnostic if isinstance(error, server.PipelineError) else str(error)
+            print(f"real-book-slot-{slot}: FAIL code={code} diagnostic={diagnostic or 'none'}")
+            failures.append((slot, code))
+    if failures:
+        summary = ", ".join(f"slot-{slot}:{code}" for slot, code in failures)
+        raise SystemExit(f"Real-book gate failed: {summary}")
 
 
 if __name__ == "__main__":

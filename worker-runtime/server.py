@@ -329,9 +329,10 @@ def normalize_inline_block_nesting(text):
     }
     block = {
         "address", "article", "aside", "blockquote", "details", "dialog",
-        "div", "dl", "fieldset", "figcaption", "figure", "footer", "form",
-        "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "main",
-        "nav", "ol", "p", "pre", "section", "table", "ul",
+        "dd", "div", "dl", "dt", "fieldset", "figcaption", "figure",
+        "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6",
+        "header", "hgroup", "hr", "li", "main", "menu", "nav", "ol",
+        "p", "pre", "search", "section", "summary", "table", "ul",
     }
 
     try:
