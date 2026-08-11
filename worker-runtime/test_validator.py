@@ -163,7 +163,7 @@ def main():
         epubcheck(silvia)
         with zipfile.ZipFile(silvia) as archive:
             chapters = [archive.read(name).decode("utf-8") for name in archive.namelist() if name.lower().endswith((".xhtml", ".html"))]
-            chapter = next(text for text in chapters if "Capítulo" in text or "Sonhos Proibidos" in text)
+            chapter = next(text for text in chapters if "Livro da Silvia" in text)
             assert "Introdução" in chapter and "continuação." in chapter
             assert "<p>Introdução <h1" not in chapter
             assert "<img" in chapter and 'alt=""' in chapter
