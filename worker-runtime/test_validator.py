@@ -150,6 +150,7 @@ def main():
                 text = data.decode("utf-8")
                 text = re.sub(r"(<h1\b[^>]*>.*?</h1>)", r"<p>Introdução \1 continuação.</p>", text, count=1, flags=re.DOTALL)
                 text = re.sub(r"(<img\b[^>]*?)\s+alt\s*=\s*(?:\"[^\"]*\"|'[^']*')", r"\1", text, count=1, flags=re.IGNORECASE)
+                text = re.sub(r"(<img\b[^>]*?/?>)", r"<p>\1</p>", text, count=1, flags=re.IGNORECASE)
                 return text.encode("utf-8")
             return data
         rewrite_epub(clean, silvia, add_invalid_nesting)
