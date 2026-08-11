@@ -185,10 +185,13 @@ def main():
                 "kindle_pw3",
                 "--epub-version",
                 "3",
+                "--language",
+                "pt",
             ],
             check=True,
             stdout=subprocess.DEVNULL,
         )
+        epubcheck(kobo_clean)
         kobo = root / "kobo-missing-script.epub"
         def add_missing_kobo_script(name, data):
             if name.lower().endswith((".xhtml", ".html")) and b"<body" in data:
