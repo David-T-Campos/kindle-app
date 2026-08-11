@@ -136,14 +136,18 @@ def main():
         require_pipeline_error("EMPTY_CHAPTERS", lambda: validate({}, contentless, contentless_output, announce=False))
 
         html_source = root / "repairable.html"
-        (root / "pixel.png").write_bytes(PIXEL)
-        html_source.write_text("<!doctype html><html><head><meta charset='utf-8'><title>Repair fixture</title></head><body><h1>Sonhos Proibidos</h1><img src='pixel.png' alt='Imagem decorativa'/>" + "<p>Texto português real para confirmar uma reparação completa e sem perda de conteúdo.</p>" * 30 + "</body></html>", encoding="utf-8")
+        html_source.write_text("<!doctype html><html><head><meta charset='utf-8'><title>Repair fixture</title></head><body><h1>Sonhos Proibidos</h1>" + "<p>Texto português real para confirmar uma reparação completa e sem perda de conteúdo.</p>" * 30 + "</body></html>", encoding="utf-8")
         clean = root / "clean.epub"
         subprocess.run(["ebook-convert", str(html_source), str(clean), "--output-profile", "kindle_pw3"], check=True, stdout=subprocess.DEVNULL)
 
         # Reproduce Silvia's production EPUBCheck failure inside an otherwise
         # valid Calibre EPUB: a block heading is nested in a paragraph and an
         # image has no alt text. Repair must preserve all visible content.
+        (root / "pixel.png").write_bytes(PIXEL)
+        silvia_html = root / "silvia.html"
+        silvia_html.write_text("<!doctype html><html><head><meta charset='utf-8'><title>Silvia fixture</title></head><body><h1>Livro da Silvia</h1><img src='pixel.png' alt='Imagem decorativa'/><p>Conteúdo real preservado.</p></body></html>", encoding="utf-8")
+        silvia_clean = root / "silvia-clean.epub"
+        subprocess.run(["ebook-convert", str(silvia_html), str(silvia_clean), "--output-profile", "kindle_pw3"], check=True, stdout=subprocess.DEVNULL)
         silvia = root / "silvia-invalid-nesting.epub"
         def add_invalid_nesting(name, data):
             if name.lower().endswith((".xhtml", ".html")) and b"<body" in data and b"<h1" in data:
@@ -153,7 +157,7 @@ def main():
                 text = re.sub(r"(<img\b[^>]*?/?>)", r"<p>\1</p>", text, count=1, flags=re.IGNORECASE)
                 return text.encode("utf-8")
             return data
-        rewrite_epub(clean, silvia, add_invalid_nesting)
+        rewrite_epub(silvia_clean, silvia, add_invalid_nesting)
         require_pipeline_error("EPUBCHECK_FAILED", lambda: epubcheck(silvia))
         normalize_epub(silvia)
         epubcheck(silvia)
