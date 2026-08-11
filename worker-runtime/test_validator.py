@@ -12,7 +12,7 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, "/app")
-from server import PipelineError, epubcheck, inventory, normalize_content_document, validate, validation_summary
+from server import PipelineError, epubcheck, inventory, normalize_content_document, normalize_epub, validate, validation_summary
 
 CONTAINER = b'''<?xml version="1.0" encoding="UTF-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -136,9 +136,32 @@ def main():
         require_pipeline_error("EMPTY_CHAPTERS", lambda: validate({}, contentless, contentless_output, announce=False))
 
         html_source = root / "repairable.html"
-        html_source.write_text("<!doctype html><html><head><meta charset='utf-8'><title>Repair fixture</title></head><body><h1>Sonhos Proibidos</h1>" + "<p>Texto português real para confirmar uma reparação completa e sem perda de conteúdo.</p>" * 30 + "</body></html>", encoding="utf-8")
+        (root / "pixel.png").write_bytes(PIXEL)
+        html_source.write_text("<!doctype html><html><head><meta charset='utf-8'><title>Repair fixture</title></head><body><h1>Sonhos Proibidos</h1><img src='pixel.png' alt='Imagem decorativa'/>" + "<p>Texto português real para confirmar uma reparação completa e sem perda de conteúdo.</p>" * 30 + "</body></html>", encoding="utf-8")
         clean = root / "clean.epub"
         subprocess.run(["ebook-convert", str(html_source), str(clean), "--output-profile", "kindle_pw3"], check=True, stdout=subprocess.DEVNULL)
+
+        # Reproduce Silvia's production EPUBCheck failure inside an otherwise
+        # valid Calibre EPUB: a block heading is nested in a paragraph and an
+        # image has no alt text. Repair must preserve all visible content.
+        silvia = root / "silvia-invalid-nesting.epub"
+        def add_invalid_nesting(name, data):
+            if name.lower().endswith((".xhtml", ".html")) and b"<body" in data and b"<h1" in data:
+                text = data.decode("utf-8")
+                text = re.sub(r"(<h1\b[^>]*>.*?</h1>)", r"<p>Introdução \1 continuação.</p>", text, count=1, flags=re.DOTALL)
+                text = re.sub(r"(<img\b[^>]*?)\s+alt\s*=\s*(?:\"[^\"]*\"|'[^']*')", r"\1", text, count=1, flags=re.IGNORECASE)
+                return text.encode("utf-8")
+            return data
+        rewrite_epub(clean, silvia, add_invalid_nesting)
+        require_pipeline_error("EPUBCHECK_FAILED", lambda: epubcheck(silvia))
+        normalize_epub(silvia)
+        epubcheck(silvia)
+        with zipfile.ZipFile(silvia) as archive:
+            chapters = [archive.read(name).decode("utf-8") for name in archive.namelist() if name.lower().endswith((".xhtml", ".html"))]
+            chapter = next(text for text in chapters if "Capítulo" in text or "Sonhos Proibidos" in text)
+            assert "Introdução" in chapter and "continuação." in chapter
+            assert "<p>Introdução <h1" not in chapter
+            assert "<img" in chapter and 'alt=""' in chapter
 
         malformed = root / "sonhos-proibidos-malformed.epub"
         def break_epub(name, data):

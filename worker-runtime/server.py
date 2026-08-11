@@ -236,7 +236,7 @@ def local_reference_exists(document, reference, names):
     return any(unicodedata.normalize("NFC", name) == normalized for name in names)
 
 def normalize_content_document(text, document, names):
-    """Remove only broken local references and invalid HTML dimensions."""
+    """Repair bounded, content-preserving XHTML conformance defects."""
     def media_tag(match):
         tag = match.group(0)
         reference = re.search(r"\s+(?:src|href|xlink:href)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag, flags=re.IGNORECASE)
@@ -244,7 +244,13 @@ def normalize_content_document(text, document, names):
             alt = re.search(r"\s+alt\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag, flags=re.IGNORECASE)
             alt_text = (alt.group(1) if alt.group(1) is not None else alt.group(2)) if alt else ""
             return html.escape(alt_text or "")
-        return re.sub(r"\s+(?:width|height)\s*=\s*(?:\"(?!\d+\")[^\"]*\"|'(?!\d+')[^']*')", "", tag, flags=re.IGNORECASE)
+        tag = re.sub(r"\s+(?:width|height)\s*=\s*(?:\"(?!\d+\")[^\"]*\"|'(?!\d+')[^']*')", "", tag, flags=re.IGNORECASE)
+        # EPUB XHTML requires alt on HTML img elements. An empty value is the
+        # standards-correct representation for a decorative image and changes
+        # neither the image nor the book's visible text.
+        if re.match(r"<img\b", tag, flags=re.IGNORECASE) and not re.search(r"\s+alt\s*=", tag, flags=re.IGNORECASE):
+            tag = re.sub(r"\s*/?>$", lambda ending: f' alt=""{ending.group(0)}', tag, count=1)
+        return tag
 
     text = re.sub(r"<(?:img|(?:[\w.-]+:)?image)\b[^>]*?/?>", media_tag, text, flags=re.IGNORECASE)
 
@@ -264,7 +270,63 @@ def normalize_content_document(text, document, names):
             return re.sub(r"\s+href\s*=\s*(?:\"[^\"]*\"|'[^']*')", "", tag, count=1, flags=re.IGNORECASE)
         return tag
 
-    return re.sub(r"<a\b[^>]*>", anchor_tag, text, flags=re.IGNORECASE)
+    text = re.sub(r"<a\b[^>]*>", anchor_tag, text, flags=re.IGNORECASE)
+    return normalize_inline_block_nesting(text)
+
+def normalize_inline_block_nesting(text):
+    """Replace only block tags illegally nested in phrasing-only elements.
+
+    Some source EPUBs contain schema-invalid constructs such as
+    ``<p><h1>...</h1></p>``. Calibre preserves the visible content but also
+    preserves that invalid nesting across conversion passes. Re-tagging the
+    inner block as a span retains its text, attributes, order, and styling while
+    making the XHTML content model valid. Valid top-level headings are untouched.
+    """
+    phrasing_only = {
+        "a", "abbr", "b", "bdi", "bdo", "cite", "code", "data", "del",
+        "dfn", "em", "h1", "h2", "h3", "h4", "h5", "h6", "i", "ins",
+        "kbd", "label", "mark", "p", "q", "s", "samp", "small", "span",
+        "strong", "sub", "sup", "time", "u", "var",
+    }
+    block = {
+        "address", "article", "aside", "blockquote", "details", "dialog",
+        "div", "dl", "fieldset", "figcaption", "figure", "footer", "form",
+        "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "main",
+        "nav", "ol", "p", "pre", "section", "table", "ul",
+    }
+
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        # The caller still runs EPUBCheck and fails closed; never guess at XML
+        # that is not well-formed enough for a structural repair.
+        return text
+
+    changed = False
+    for parent in root.iter():
+        if not isinstance(parent.tag, str):
+            continue
+        parent_name = parent.tag.rsplit("}", 1)[-1].lower()
+        if parent_name not in phrasing_only:
+            continue
+        for child in list(parent):
+            if not isinstance(child.tag, str):
+                continue
+            child_name = child.tag.rsplit("}", 1)[-1].lower()
+            if child_name not in block:
+                continue
+            namespace = child.tag[:-len(child_name)] if child.tag.startswith("{") else ""
+            child.tag = f"{namespace}span"
+            changed = True
+
+    if not changed:
+        return text
+
+    ET.register_namespace("", "http://www.w3.org/1999/xhtml")
+    ET.register_namespace("epub", "http://www.idpf.org/2007/ops")
+    rendered = ET.tostring(root, encoding="unicode", method="xml")
+    root_tag = re.search(r"<(?:[\w.-]+:)?html\b", text, flags=re.IGNORECASE)
+    return (text[:root_tag.start()] if root_tag else "") + rendered
 
 def normalize_epub(path):
     temp = path.with_suffix(".nfc.epub")
