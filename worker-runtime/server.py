@@ -549,8 +549,19 @@ def validation_summary(report):
 def upload(job, output, report):
     data = output.read_bytes(); digest = hashlib.sha256(data).hexdigest()
     summary, encoded = validation_summary(report)
-    headers = {"content-type": "application/epub+zip", "content-length": str(len(data)), "x-content-sha256": digest, "x-validation-summary": encoded}
-    api(job, "artifact", "PUT", data, headers); return digest, len(data), summary
+    if len(data) <= 2 * 1024 * 1024:
+        headers = {"content-type": "application/epub+zip", "content-length": str(len(data)), "x-content-sha256": digest, "x-validation-summary": encoded}
+        api(job, "artifact", "PUT", data, headers)
+    else:
+        parts = []
+        for number, start in enumerate(range(0, len(data), 2 * 1024 * 1024), start=1):
+            chunk = data[start:start + 2 * 1024 * 1024]
+            chunk_hash = hashlib.sha256(chunk).hexdigest()
+            headers = {"content-type": "application/octet-stream", "content-length": str(len(chunk)), "x-content-sha256": chunk_hash}
+            api(job, f"artifact?part={number}", "PUT", chunk, headers)
+            parts.append({"number": number, "size": len(chunk), "sha256": chunk_hash})
+        api(job, "artifact", "POST", {"contentHash": digest, "declaredSize": len(data), "validation": summary, "parts": parts})
+    return digest, len(data), summary
 
 def run(job):
     started = time.time(); timings = {}; failure_stage = "DOWNLOAD"

@@ -175,6 +175,23 @@ def main():
             server.api = original_api
         assert attempts == [30, 30, 30]
 
+        # Artifacts above the front-door request limit are uploaded as
+        # independently hashed 2 MiB chunks, then finalized by a small manifest.
+        large_artifact = root / "large-artifact.epub"
+        large_artifact.write_bytes(b"x" * (2 * 1024 * 1024 + 17))
+        calls = []
+        original_api = server.api
+        server.api = lambda job, suffix, method="GET", body=None, extra=None, timeout=300: calls.append((suffix, method, len(body) if isinstance(body, bytes) else body, extra)) or {}
+        try:
+            upload_report = {"source": None, "output": report, "epubcheck": {"version": "5.3.0", "messages": 0}}
+            server.upload({"jobId": "fixture"}, large_artifact, upload_report)
+        finally:
+            server.api = original_api
+        assert calls[0][0] == "artifact?part=1" and calls[0][2] == 2 * 1024 * 1024
+        assert calls[1][0] == "artifact?part=2" and calls[1][2] == 17
+        assert calls[2][0] == "artifact" and calls[2][1] == "POST"
+        assert calls[2][2]["declaredSize"] == 2 * 1024 * 1024 + 17 and len(calls[2][2]["parts"]) == 2
+
         # Reproduce Silvia's production EPUBCheck failure inside an otherwise
         # valid Calibre EPUB: a block heading is nested in a paragraph and an
         # image has no alt text. Repair must preserve all visible content.
