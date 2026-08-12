@@ -47,6 +47,9 @@ jobs:
             ebook-convert /tmp/input.html /tmp/output.epub --output-profile kindle_pw3
             test -s /tmp/output.epub
             java -jar /opt/epubcheck/epubcheck.jar /tmp/output.epub
+            ebook-convert /tmp/output.epub /tmp/resized.epub --output-profile kindle_pw3 --epub-version 3 --epub-max-image-size 1200x1600
+            test -s /tmp/resized.epub
+            java -jar /opt/epubcheck/epubcheck.jar /tmp/resized.epub
           '
       - name: Exercise permanent EPUB validator regressions
         run: |

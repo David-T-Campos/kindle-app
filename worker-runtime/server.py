@@ -149,15 +149,26 @@ def encoding_args(path):
     try: sample.decode("utf-8"); return ["--input-encoding", "utf-8"]
     except UnicodeDecodeError: return ["--input-encoding", "windows-1252"]
 
-def convert(job, source, output, quality=None, progress_stage="CONVERT"):
+def convert(job, source, output, max_image_size=None, progress_stage="CONVERT"):
     command = ["timeout", "--signal=TERM", "20m", "ebook-convert", str(source), str(output), "--output-profile", "kindle_pw3", "--epub-version", "3", "--change-justification", "original", *encoding_args(source)]
-    if quality: command += ["--jpeg-quality", str(quality)]
+    # Calibre's EPUB output has no --jpeg-quality option. Use its documented
+    # image-dimension control when a validated artifact must be reduced below
+    # the email attachment boundary.
+    if max_image_size: command += ["--epub-max-image-size", str(max_image_size)]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
     milestones = [("InputFormatPlugin", "A ler o ficheiro original"), ("Parsing all content", "A construir a estrutura do livro"), ("Processing images", "A processar imagens e estilos"), ("Creating EPUB Output", "A criar o novo EPUB"), ("Output saved", "A finalizar o EPUB")]
+    tail = []
     for line in iter(process.stdout.readline, ""):
+        line = re.sub(r"\s+", " ", line).strip()
+        if line:
+            tail.append(line)
+            tail = tail[-20:]
         for marker, detail in milestones:
             if marker.lower() in line.lower(): status(job, progress_stage, detail)
-    if process.wait() != 0 or not output.exists(): raise PipelineError("CALIBRE_FAILED", "Complete Calibre conversion failed")
+    if process.wait() != 0 or not output.exists():
+        diagnostic = "calibre:" + " | ".join(tail[-5:])
+        diagnostic = re.sub(r"/(?:work|tmp)/[^ ]+", "<temporary-path>", diagnostic)[:450]
+        raise PipelineError("CALIBRE_FAILED", "Complete Calibre conversion failed", diagnostic)
 
 def opf_path(archive):
     root = ET.fromstring(archive.read("META-INF/container.xml")); node = root.find(".//{*}rootfile")
@@ -256,6 +267,11 @@ def remove_forbidden_root_id(text):
 
 def local_reference_exists(document, reference, names):
     """Return whether an internal document reference resolves in the archive."""
+    # Empty href/src values are legal same-document references. Regex callers
+    # use `group(1) or group(2)`, which produces None for an empty quoted value;
+    # treat both forms as present rather than attempting `.strip()` on None.
+    if not isinstance(reference, str) or not reference.strip():
+        return True
     parsed = urlsplit(html.unescape(reference.strip()))
     if parsed.scheme or parsed.netloc or not parsed.path:
         return True
@@ -568,8 +584,17 @@ def run(job):
             timings["convertAndVerifyMs"] = int((time.time()-t)*1000)
             failure_stage = "VERIFY"
             if output.stat().st_size > 24 * 1024 * 1024:
-                status(job, "VERIFY", "A reduzir imagens para o limite de envio")
-                optimized = work / "book-optimized.epub"; convert(job, output, optimized, 85, "VERIFY"); report = validate(job, output, optimized); output = optimized
+                # Reduce dimensions progressively using Calibre's documented
+                # EPUB option. Every candidate is compared with the previous
+                # valid EPUB and must pass the full strict validator.
+                for index, dimensions in enumerate(("1600x2560", "1200x1600", "900x1200", "600x800"), start=1):
+                    status(job, "VERIFY", "A reduzir imagens para o limite de envio")
+                    optimized = work / f"book-optimized-{index}.epub"
+                    convert(job, output, optimized, dimensions, "VERIFY")
+                    report = validate(job, output, optimized)
+                    output = optimized
+                    if output.stat().st_size <= 24 * 1024 * 1024:
+                        break
             if output.stat().st_size > 24 * 1024 * 1024: raise PipelineError("TOO_LARGE", "Validated EPUB exceeds Gmail's attachment limit")
             failure_stage = "PREPARE"
             status(job, "PREPARE", "A confirmar tamanho, nome e metadados")

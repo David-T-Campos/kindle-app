@@ -101,13 +101,15 @@ def main():
         cleaned = normalize_content_document(
             '<p><img src="../image/missing.jpg" alt="Ilustração"/>'
             '<img src="../image/real.jpg" width="100%" height="auto"/>'
-            '<a href="missing.xhtml">Texto preservado</a></p>',
+            '<a href="missing.xhtml">Texto preservado</a>'
+            '<a href="">Ligação ao próprio documento</a></p>',
             "OEBPS/Text/chapter.xhtml",
             {"OEBPS/Text/chapter.xhtml", "OEBPS/image/real.jpg"},
         )
         assert "missing.jpg" not in cleaned and "Ilustração" in cleaned
         assert 'width="100%"' not in cleaned and 'height="auto"' not in cleaned
         assert "missing.xhtml" not in cleaned and "Texto preservado" in cleaned
+        assert 'href=""' in cleaned and "Ligação ao próprio documento" in cleaned
 
         # Reproduce the production failure: a real-sized inventory exceeds the
         # old 7,000-character header, while the new summary remains valid JSON.
