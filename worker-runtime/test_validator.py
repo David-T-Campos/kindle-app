@@ -162,21 +162,34 @@ def main():
 
         # Status callbacks are idempotent and must survive transient proxy
         # timeouts instead of aborting an otherwise valid conversion.
-        original_api, attempts = server.api, []
+        original_api, original_sleep, attempts = server.api, server.time.sleep, []
         def flaky_status(*args, **kwargs):
             attempts.append(kwargs.get("timeout"))
             if len(attempts) < 3:
-                raise PipelineError("CALLBACK_FAILED", "temporary")
+                raise PipelineError("CALLBACK_FAILED", "temporary", {"transient": True})
             return {"ok": True}
         server.api = flaky_status
+        server.time.sleep = lambda _seconds: None
         try:
             server.status({"jobId": "fixture"}, "VERIFY", "A validar")
         finally:
             server.api = original_api
+            server.time.sleep = original_sleep
         assert attempts == [30, 30, 30]
 
+        # Repeated progress-only edge failures are non-fatal; the final state
+        # remains strict so an unrecorded success can never be published.
+        server.api = lambda *args, **kwargs: (_ for _ in ()).throw(PipelineError("CALLBACK_FAILED", "temporary", {"transient": True}))
+        server.time.sleep = lambda _seconds: None
+        try:
+            assert server.status({"jobId": "fixture"}, "VERIFY", "A validar") == {"ok": False, "deferred": True}
+            require_pipeline_error("CALLBACK_FAILED", lambda: server.status({"jobId": "fixture"}, "SUBMITTED", "Pronto", state="SUBMITTED"))
+        finally:
+            server.api = original_api
+            server.time.sleep = original_sleep
+
         # Artifacts above the front-door request limit are uploaded as
-        # independently hashed 2 MiB chunks, then finalized by a small manifest.
+        # independently hashed 1 MiB chunks, then finalized by a small manifest.
         large_artifact = root / "large-artifact.epub"
         large_artifact.write_bytes(b"x" * (2 * 1024 * 1024 + 17))
         calls = []
@@ -187,10 +200,11 @@ def main():
             server.upload({"jobId": "fixture"}, large_artifact, upload_report)
         finally:
             server.api = original_api
-        assert calls[0][0] == "artifact?part=1" and calls[0][2] == 2 * 1024 * 1024
-        assert calls[1][0] == "artifact?part=2" and calls[1][2] == 17
-        assert calls[2][0] == "artifact" and calls[2][1] == "POST"
-        assert calls[2][2]["declaredSize"] == 2 * 1024 * 1024 + 17 and len(calls[2][2]["parts"]) == 2
+        assert calls[0][0] == "artifact?part=1" and calls[0][2] == 1024 * 1024
+        assert calls[1][0] == "artifact?part=2" and calls[1][2] == 1024 * 1024
+        assert calls[2][0] == "artifact?part=3" and calls[2][2] == 17
+        assert calls[3][0] == "artifact" and calls[3][1] == "POST"
+        assert calls[3][2]["declaredSize"] == 2 * 1024 * 1024 + 17 and len(calls[3][2]["parts"]) == 3
 
         # Reproduce Silvia's production EPUBCheck failure inside an otherwise
         # valid Calibre EPUB: a block heading is nested in a paragraph and an

@@ -63,22 +63,35 @@ def api(job, suffix, method="GET", body=None, extra=None, timeout=300):
             raw = response.read(); return json.loads(raw) if raw else {}
     except HTTPError as error:
         detail = error.read().decode("utf-8", "replace")[:500]
-        raise PipelineError("CALLBACK_FAILED", f"{suffix}: {error.code} {detail}")
+        raise PipelineError("CALLBACK_FAILED", f"{suffix}: {error.code} {detail}", {
+            "httpStatus": error.code,
+            "transient": error.code in {408, 425, 429, 500, 502, 503, 504},
+        })
     except (URLError, TimeoutError) as error:
-        raise PipelineError("CALLBACK_FAILED", f"{suffix}: transient network failure") from error
+        raise PipelineError("CALLBACK_FAILED", f"{suffix}: transient network failure", {"transient": True}) from error
+
+def retry_api(job, suffix, method="GET", body=None, extra=None, timeout=300, attempts=5):
+    """Retry only idempotent callback operations after transient edge failures."""
+    for attempt in range(attempts):
+        try:
+            return api(job, suffix, method=method, body=body, extra=extra, timeout=timeout)
+        except PipelineError as error:
+            transient = isinstance(error.diagnostic, dict) and error.diagnostic.get("transient") is True
+            if not transient or attempt == attempts - 1:
+                raise
+            time.sleep(min(8, 1 << attempt))
 
 def status(job, stage, detail, state="RUNNING", **extra):
     assert stage in STAGES or stage == "SUBMITTED"
     payload = {"stage": stage, "detail": detail, "state": state}; payload.update(extra)
-    # Status writes are idempotent and may be retried safely. A transient proxy
-    # stall must not discard a valid conversion after several minutes of work.
-    for attempt in range(3):
-        try:
-            return api(job, "status", "PATCH", payload, timeout=30)
-        except PipelineError as error:
-            if error.code != "CALLBACK_FAILED" or attempt == 2:
-                raise
-            time.sleep(1 << attempt)
+    # Progress is advisory and idempotent. Preserve the conversion through a
+    # temporary Sites outage, but keep the final state write strictly required.
+    try:
+        return retry_api(job, "status", "PATCH", payload, timeout=30)
+    except PipelineError as error:
+        if state == "RUNNING" and isinstance(error.diagnostic, dict) and error.diagnostic.get("transient") is True:
+            return {"ok": False, "deferred": True}
+        raise
 
 def ensure_current(job, phase):
     if time.time() - int(job["issuedAt"]) > MAX_JOB_AGE:
@@ -551,16 +564,17 @@ def upload(job, output, report):
     summary, encoded = validation_summary(report)
     if len(data) <= 2 * 1024 * 1024:
         headers = {"content-type": "application/epub+zip", "content-length": str(len(data)), "x-content-sha256": digest, "x-validation-summary": encoded}
-        api(job, "artifact", "PUT", data, headers)
+        retry_api(job, "artifact", "PUT", data, headers)
     else:
         parts = []
-        for number, start in enumerate(range(0, len(data), 2 * 1024 * 1024), start=1):
-            chunk = data[start:start + 2 * 1024 * 1024]
+        chunk_size = 1024 * 1024
+        for number, start in enumerate(range(0, len(data), chunk_size), start=1):
+            chunk = data[start:start + chunk_size]
             chunk_hash = hashlib.sha256(chunk).hexdigest()
             headers = {"content-type": "application/octet-stream", "content-length": str(len(chunk)), "x-content-sha256": chunk_hash}
-            api(job, f"artifact?part={number}", "PUT", chunk, headers)
+            retry_api(job, f"artifact?part={number}", "PUT", chunk, headers)
             parts.append({"number": number, "size": len(chunk), "sha256": chunk_hash})
-        api(job, "artifact", "POST", {"contentHash": digest, "declaredSize": len(data), "validation": summary, "parts": parts})
+        retry_api(job, "artifact", "POST", {"contentHash": digest, "declaredSize": len(data), "validation": summary, "parts": parts})
     return digest, len(data), summary
 
 def run(job):
