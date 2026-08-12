@@ -95,7 +95,9 @@ jobs:
     timeout-minutes: 35
     strategy:
       fail-fast: false
-      max-parallel: 5
+      # Keep the live callback surface below its normal multi-user load while
+      # still exercising overlapping conversions.
+      max-parallel: 2
       matrix:
         job: ${{ fromJSON(needs.provision-real-books.outputs.jobs) }}
     steps:

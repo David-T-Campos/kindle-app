@@ -12,6 +12,7 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, "/app")
+import server
 from server import PipelineError, epubcheck, inventory, normalize_content_document, normalize_epub, source_inventory, validate, validation_summary
 
 CONTAINER = b'''<?xml version="1.0" encoding="UTF-8"?>
@@ -156,6 +157,21 @@ def main():
         assert mimetype_report["source"] is None
         assert mimetype_report["output"]["readableSpineItems"] > 0
         assert mimetype_report["epubcheck"]["messages"] == 0
+
+        # Status callbacks are idempotent and must survive transient proxy
+        # timeouts instead of aborting an otherwise valid conversion.
+        original_api, attempts = server.api, []
+        def flaky_status(*args, **kwargs):
+            attempts.append(kwargs.get("timeout"))
+            if len(attempts) < 3:
+                raise PipelineError("CALLBACK_FAILED", "temporary")
+            return {"ok": True}
+        server.api = flaky_status
+        try:
+            server.status({"jobId": "fixture"}, "VERIFY", "A validar")
+        finally:
+            server.api = original_api
+        assert attempts == [30, 30, 30]
 
         # Reproduce Silvia's production EPUBCheck failure inside an otherwise
         # valid Calibre EPUB: a block heading is nested in a paragraph and an

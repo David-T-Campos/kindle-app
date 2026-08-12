@@ -53,22 +53,32 @@ def github_identity(subject):
 def headers_for(job):
     return {"x-github-oidc-token": github_identity(job["jobId"])}
 
-def api(job, suffix, method="GET", body=None, extra=None):
+def api(job, suffix, method="GET", body=None, extra=None, timeout=300):
     url = f'{APP_ORIGIN}/api/internal/jobs/{job["jobId"]}/{suffix}'
     headers = headers_for(job); headers.update(extra or {})
     data = body if isinstance(body, bytes) else (json.dumps(body).encode() if body is not None else None)
     if body is not None and not isinstance(body, bytes): headers["content-type"] = "application/json"
     try:
-        with urlopen(Request(url, data=data, headers=headers, method=method), timeout=300) as response:
+        with urlopen(Request(url, data=data, headers=headers, method=method), timeout=timeout) as response:
             raw = response.read(); return json.loads(raw) if raw else {}
     except HTTPError as error:
         detail = error.read().decode("utf-8", "replace")[:500]
         raise PipelineError("CALLBACK_FAILED", f"{suffix}: {error.code} {detail}")
+    except (URLError, TimeoutError) as error:
+        raise PipelineError("CALLBACK_FAILED", f"{suffix}: transient network failure") from error
 
 def status(job, stage, detail, state="RUNNING", **extra):
     assert stage in STAGES or stage == "SUBMITTED"
     payload = {"stage": stage, "detail": detail, "state": state}; payload.update(extra)
-    api(job, "status", "PATCH", payload)
+    # Status writes are idempotent and may be retried safely. A transient proxy
+    # stall must not discard a valid conversion after several minutes of work.
+    for attempt in range(3):
+        try:
+            return api(job, "status", "PATCH", payload, timeout=30)
+        except PipelineError as error:
+            if error.code != "CALLBACK_FAILED" or attempt == 2:
+                raise
+            time.sleep(1 << attempt)
 
 def ensure_current(job, phase):
     if time.time() - int(job["issuedAt"]) > MAX_JOB_AGE:
