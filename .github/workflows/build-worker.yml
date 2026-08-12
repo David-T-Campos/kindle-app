@@ -1,4 +1,4 @@
-name: Build conversion worker image
+name: Build and verify conversion worker image
 
 on:
   push:
@@ -15,12 +15,17 @@ permissions:
 
 concurrency:
   group: os-meus-livros-worker-image
-  cancel-in-progress: true
+  cancel-in-progress: false
+
+env:
+  APP_ORIGIN: https://os-meus-livros.vercel.app
+  CANDIDATE_IMAGE: ghcr.io/david-t-campos/kindle-app-worker:candidate-${{ github.sha }}
+  PRODUCTION_IMAGE: ghcr.io/david-t-campos/kindle-app-worker:calibre-9.12.0-v2
 
 jobs:
-  build:
+  build-candidate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -29,12 +34,10 @@ jobs:
         env:
           GHCR_TOKEN: ${{ github.token }}
         run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
-      - name: Build and verify the pinned worker
-        env:
-          WORKER_IMAGE: ghcr.io/david-t-campos/kindle-app-worker:calibre-9.12.0-v2
+      - name: Build and verify the pinned candidate worker
         run: |
-          docker build --pull --build-arg CALIBRE_VERSION=9.12.0 --tag "$WORKER_IMAGE" worker-runtime
-          docker run --rm --entrypoint /bin/sh "$WORKER_IMAGE" -c '
+          docker build --pull --build-arg CALIBRE_VERSION=9.12.0 --tag "$CANDIDATE_IMAGE" worker-runtime
+          docker run --rm --entrypoint /bin/sh "$CANDIDATE_IMAGE" -c '
             set -eu
             test -e /usr/share/zoneinfo/UTC
             python3 -c "from zoneinfo import ZoneInfo; ZoneInfo(\"UTC\")"
@@ -45,26 +48,146 @@ jobs:
             test -s /tmp/output.epub
             java -jar /opt/epubcheck/epubcheck.jar /tmp/output.epub
           '
-      - name: Exercise real EPUB validator regressions
-        env:
-          WORKER_IMAGE: ghcr.io/david-t-campos/kindle-app-worker:calibre-9.12.0-v2
+      - name: Exercise permanent EPUB validator regressions
         run: |
           docker run --rm \
             --entrypoint python3 \
             --volume "$PWD/worker-runtime/test_validator.py:/tmp/test_validator.py:ro" \
-            "$WORKER_IMAGE" /tmp/test_validator.py
-      - name: Prove the published worker can authenticate to production
-        env:
-          APP_ORIGIN: https://os-meus-livros.vercel.app
-          WORKER_IMAGE: ghcr.io/david-t-campos/kindle-app-worker:calibre-9.12.0-v2
+            "$CANDIDATE_IMAGE" /tmp/test_validator.py
+      - name: Prove the candidate can authenticate to production
         run: |
           docker run --rm \
             --entrypoint python3 \
             --env ACTIONS_ID_TOKEN_REQUEST_URL \
             --env ACTIONS_ID_TOKEN_REQUEST_TOKEN \
             --env APP_ORIGIN \
-            "$WORKER_IMAGE" -c 'import sys; sys.path.insert(0,"/app"); from server import APP_ORIGIN,headers_for; from urllib.request import Request,urlopen; request=Request(APP_ORIGIN+"/api/internal/worker-auth-smoke",headers=headers_for({"jobId":"smoke"}),method="POST"); response=urlopen(request,timeout=30); assert response.status == 200'
-      - name: Publish the verified worker
+            "$CANDIDATE_IMAGE" -c 'import sys; sys.path.insert(0,"/app"); from server import APP_ORIGIN,headers_for; from urllib.request import Request,urlopen; request=Request(APP_ORIGIN+"/api/internal/worker-auth-smoke",headers=headers_for({"jobId":"smoke"}),method="POST"); response=urlopen(request,timeout=30); assert response.status == 200'
+      - name: Publish the immutable candidate only
+        run: docker push "$CANDIDATE_IMAGE"
+
+  provision-real-books:
+    needs: build-candidate
+    runs-on: ubuntu-24.04
+    outputs:
+      jobs: ${{ steps.create.outputs.jobs }}
+    steps:
+      - id: create
+        name: Create ten isolated no-delivery jobs
+        run: |
+          AUDIENCE=$(python3 -c 'import urllib.parse; print(urllib.parse.quote("os-meus-livros:real-books-smoke", safe=""))')
+          TOKEN=$(curl --fail-with-body --silent --show-error --max-time 30 \
+            --header "authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')
+          echo "::add-mask::$TOKEN"
+          RESPONSE=$(curl --fail-with-body --silent --show-error --max-time 60 \
+            --request POST \
+            --header "content-type: application/json" \
+            --header "x-github-oidc-token: $TOKEN" \
+            --data '{"action":"create"}' \
+            "$APP_ORIGIN/api/internal/real-books-smoke")
+          JOBS=$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["jobs"],separators=(",",":")))' "$RESPONSE")
+          test "$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "$JOBS")" = 10
+          echo "jobs=$JOBS" >> "$GITHUB_OUTPUT"
+
+  convert-real-books:
+    needs: provision-real-books
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        job: ${{ fromJSON(needs.provision-real-books.outputs.jobs) }}
+    steps:
+      - name: Load the immutable candidate worker
         env:
-          WORKER_IMAGE: ghcr.io/david-t-campos/kindle-app-worker:calibre-9.12.0-v2
-        run: docker push "$WORKER_IMAGE"
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          echo "$GHCR_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+          docker pull "$CANDIDATE_IMAGE"
+      - name: Run the exact production path with delivery disabled
+        env:
+          JOB_PAYLOAD: ${{ toJSON(matrix.job) }}
+          CALIBRE_VERSION: "9.12.0"
+          EPUBCHECK_VERSION: "5.3.0"
+          PROFILE_VERSION: "default-1"
+          VALIDATOR_VERSION: "1"
+        run: |
+          docker run --rm \
+            --entrypoint python3 \
+            --env ACTIONS_ID_TOKEN_REQUEST_URL \
+            --env ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+            --env APP_ORIGIN \
+            --env CALIBRE_VERSION \
+            --env EPUBCHECK_VERSION \
+            --env PROFILE_VERSION \
+            --env VALIDATOR_VERSION \
+            --env JOB_PAYLOAD \
+            "$CANDIDATE_IMAGE" /app/run_job.py
+
+  verify-and-clean-real-books:
+    if: always() && needs.provision-real-books.result == 'success'
+    needs: [provision-real-books, convert-real-books]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Obtain a fresh production identity
+        run: |
+          AUDIENCE=$(python3 -c 'import urllib.parse; print(urllib.parse.quote("os-meus-livros:real-books-smoke", safe=""))')
+          TOKEN=$(curl --fail-with-body --silent --show-error --max-time 30 \
+            --header "authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')
+          echo "::add-mask::$TOKEN"
+          echo "SMOKE_OIDC_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+      - name: Require ten clean artifacts and zero deliveries
+        env:
+          JOBS: ${{ needs.provision-real-books.outputs.jobs }}
+        run: |
+          BODY=$(python3 -c 'import json,os; jobs=json.loads(os.environ["JOBS"]); print(json.dumps({"action":"results","jobIds":[job["job_id"] for job in jobs]},separators=(",",":")))')
+          curl --fail-with-body --silent --show-error --max-time 60 \
+            --request POST \
+            --header "content-type: application/json" \
+            --header "x-github-oidc-token: $SMOKE_OIDC_TOKEN" \
+            --data "$BODY" \
+            "$APP_ORIGIN/api/internal/real-books-smoke" > /tmp/results.json
+          python3 - <<'PY'
+          import json
+          with open("/tmp/results.json", encoding="utf-8") as handle:
+              jobs = json.load(handle).get("jobs", [])
+          assert len(jobs) == 10, jobs
+          for slot, job in enumerate(jobs, start=1):
+              assert job["state"] == "SUBMITTED" and job["stage"] == "SUBMITTED", (slot, job)
+              assert not job["errorCode"] and int(job["outputSize"] or 0) > 0, (slot, job)
+              validation = json.loads(job["validationJson"])
+              assert validation["schemaVersion"] == 1, (slot, validation)
+              assert validation["output"]["readableSpineItems"] > 0, (slot, validation)
+              assert validation["epubcheck"]["version"] == "5.3.0", (slot, validation)
+              assert int(validation["epubcheck"]["messages"]) == 0, (slot, validation)
+              assert int(job["deliveryCount"]) == 0, (slot, job)
+              print(f"real-book-slot-{slot}: PASS spine={validation['output']['spineCount']} text={validation['output']['textChars']} bytes={job['outputSize']}")
+          print("10/10 real Drive books reached clean upload-ready artifacts with zero deliveries")
+          PY
+      - name: Remove all temporary jobs and artifacts
+        if: always()
+        env:
+          JOBS: ${{ needs.provision-real-books.outputs.jobs }}
+        run: |
+          BODY=$(python3 -c 'import json,os; jobs=json.loads(os.environ["JOBS"]); print(json.dumps({"action":"cleanup","jobIds":[job["job_id"] for job in jobs]},separators=(",",":")))')
+          curl --fail-with-body --silent --show-error --max-time 60 \
+            --request POST \
+            --header "content-type: application/json" \
+            --header "x-github-oidc-token: $SMOKE_OIDC_TOKEN" \
+            --data "$BODY" \
+            "$APP_ORIGIN/api/internal/real-books-smoke"
+
+  publish-production:
+    needs: [build-candidate, verify-and-clean-real-books]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Publish only the ten-book-verified worker
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          echo "$GHCR_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+          docker pull "$CANDIDATE_IMAGE"
+          docker tag "$CANDIDATE_IMAGE" "$PRODUCTION_IMAGE"
+          docker push "$PRODUCTION_IMAGE"

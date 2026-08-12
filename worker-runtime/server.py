@@ -219,6 +219,24 @@ def inventory(path):
         joined = "\n".join(texts); suspicious = sum(joined.count(x) for x in ("�", "Ã£", "Ã©", "Ã§", "â€œ", "â€™"))
         return {"package": package, "manifestCount": len(manifest), "spineCount": len(spine), "chapters": chapters, "resources": resources, "textChars": len(joined), "paragraphs": len(re.findall(r"\n|[.!?]\s", joined)), "emptyChapters": empty, "readableSpineItems": readable_spine_items, "spineTextChars": spine_text_chars, "spineVisualItems": spine_visual_items, "suspiciousEncoding": suspicious, "replacementCharacters": joined.count("�")}
 
+def source_inventory(path):
+    """Return comparison evidence only when the original EPUB is trustworthy.
+
+    The converted output is always normalized and validated strictly. The
+    original file is optional evidence used only for text/chapter retention
+    comparisons. Real-world EPUBs can be readable by Calibre while carrying a
+    malformed mimetype entry, package document, or manifest; those defects must
+    trigger full conversion, not crash validation of the repaired output.
+    """
+    try:
+        return inventory(path)
+    except PipelineError as error:
+        if error.code in {"INVALID_EPUB", "BROKEN_MANIFEST"}:
+            return None
+        raise
+    except (ET.ParseError, KeyError, UnicodeDecodeError, zipfile.BadZipFile):
+        return None
+
 def remove_forbidden_root_id(text):
     """Remove an XHTML root id that EPUBCheck rejects, preserving all child ids."""
     root = re.search(r"<(?:[\w.-]+:)?html\b[^>]*>", text, flags=re.IGNORECASE)
@@ -437,7 +455,7 @@ def validate(job, source, output, announce=True):
     # dividers, and intentional blanks. Reject only an entirely contentless
     # reading order; individual blank/support pages are diagnostic information.
     if not current["readableSpineItems"]: raise PipelineError("EMPTY_CHAPTERS", "The reading order contains no readable text or images")
-    original = inventory(source) if source.suffix.lower() == ".epub" and zipfile.is_zipfile(source) else None
+    original = source_inventory(source) if source.suffix.lower() == ".epub" and zipfile.is_zipfile(source) else None
     if original and original["textChars"] > 1000:
         ratio = current["textChars"] / original["textChars"]
         if ratio < .92: raise PipelineError("TEXT_LOSS", f"Output retains only {ratio:.1%} of source text")

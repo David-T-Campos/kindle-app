@@ -12,7 +12,7 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, "/app")
-from server import PipelineError, epubcheck, inventory, normalize_content_document, normalize_epub, validate, validation_summary
+from server import PipelineError, epubcheck, inventory, normalize_content_document, normalize_epub, source_inventory, validate, validation_summary
 
 CONTAINER = b'''<?xml version="1.0" encoding="UTF-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -139,6 +139,23 @@ def main():
         html_source.write_text("<!doctype html><html><head><meta charset='utf-8'><title>Repair fixture</title></head><body><h1>Sonhos Proibidos</h1>" + "<p>Texto português real para confirmar uma reparação completa e sem perda de conteúdo.</p>" * 30 + "</body></html>", encoding="utf-8")
         clean = root / "clean.epub"
         subprocess.run(["ebook-convert", str(html_source), str(clean), "--output-profile", "kindle_pw3"], check=True, stdout=subprocess.DEVNULL)
+
+        # Reproduce Silvia's latest production failure. Calibre can successfully
+        # convert an EPUB-like ZIP whose original mimetype entry is malformed.
+        # The broken original cannot be trusted for retention comparison, but
+        # it must not invalidate an independently clean converted EPUB.
+        malformed_mimetype = root / "malformed-source-mimetype.epub"
+        def break_mimetype(name, data):
+            return b"application/epub+zip\r\n" if name == "mimetype" else data
+        rewrite_epub(clean, malformed_mimetype, break_mimetype)
+        require_pipeline_error("INVALID_EPUB", lambda: inventory(malformed_mimetype))
+        assert source_inventory(malformed_mimetype) is None
+        repaired_mimetype = root / "repaired-source-mimetype.epub"
+        shutil.copyfile(clean, repaired_mimetype)
+        mimetype_report = validate({}, malformed_mimetype, repaired_mimetype, announce=False)
+        assert mimetype_report["source"] is None
+        assert mimetype_report["output"]["readableSpineItems"] > 0
+        assert mimetype_report["epubcheck"]["messages"] == 0
 
         # Reproduce Silvia's production EPUBCheck failure inside an otherwise
         # valid Calibre EPUB: a block heading is nested in a paragraph and an
